@@ -1,6 +1,7 @@
 {
   "plugins": [
     "lookup_value_gui.py",
-    "converter.py"
+    "converter.py",
+    "simple_transform_tool.py"
   ]
 }
