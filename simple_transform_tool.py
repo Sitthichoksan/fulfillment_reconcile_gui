@@ -6,17 +6,17 @@ Standalone widget that can be used as a plugin in Reconcile GUI.
 
 Features
 - Load CSV/TSV/TXT/XLS/XLSX with simple auto-delimiter & encoding
-- Preview: left = original, right = current output (chained operations)
+- Preview: left = original, right = current output (single operation from original)
 - Trim: filter rows (optional) then trim values in a column
 - Delete: filter rows and delete matching rows
 - Pad: pad left/right with chosen character up to fixed length (only-shorter option)
-- Group / Sum: Group only, Sum only, Group + Sum
+- Group / Sum: Group only, Sum only, Group + Sum (dropdown)
 - Calculation: (column|constant) <op> (column|constant) → new column
 - Export: CSV / Excel from current output
 """
 
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional
 
 import pandas as pd
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -61,6 +61,7 @@ def _read_any(path: Path) -> pd.DataFrame:
                 df = None  # type: ignore
         if df is None:
             raise last_err or RuntimeError("Cannot read file")
+
     # ensure string columns
     for c in df.columns:
         df[c] = df[c].astype(str)
@@ -109,24 +110,6 @@ class _PandasModel(QtCore.QAbstractTableModel):
             else:
                 return section + 1
         return None
-
-
-class _CheckList(QtWidgets.QGroupBox):
-    """Simple multi-select list with a title."""
-    def __init__(self, title: str, parent=None):
-        super().__init__(title, parent)
-        lay = QtWidgets.QVBoxLayout(self)
-        self.list = QtWidgets.QListWidget()
-        self.list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        lay.addWidget(self.list)
-
-    def set_items(self, items: List[str]):
-        self.list.clear()
-        for c in items:
-            self.list.addItem(c)
-
-    def selected_items(self) -> List[str]:
-        return [it.text() for it in self.list.selectedItems()]
 
 
 # ---------- main widget ----------
@@ -205,7 +188,7 @@ class SimpleTransformTool(QtWidgets.QWidget):
         self._init_tab_trim()
         self._init_tab_delete()
         self._init_tab_pad()
-        self._init_tab_group()
+        self._init_tab_group()   # dropdown version
         self._init_tab_calc()
         splitter.addWidget(self.tabs)
 
@@ -216,7 +199,7 @@ class SimpleTransformTool(QtWidgets.QWidget):
         rv.setSpacing(4)
 
         lab1 = QtWidgets.QLabel("Input preview (original file)")
-        lab2 = QtWidgets.QLabel("Output preview (after operations)")
+        lab2 = QtWidgets.QLabel("Output preview (after operation)")
         for lb in (lab1, lab2):
             lb.setStyleSheet("font-weight:600; color:#374151;")
 
@@ -341,7 +324,7 @@ class SimpleTransformTool(QtWidgets.QWidget):
 
         note = QtWidgets.QLabel(
             "ตัวอย่าง: เลือก Column = SUPPLIER, Filter = contains 'CS1', Trim mode = keep last 4 chars\n"
-            "ระบบจะ trim เฉพาะแถวที่ SUPPLIER มี 'CS1' เท่านั้น"
+            "ระบบจะ trim เฉพาะแถวที่ SUPPLIER มี 'CS1' เท่านั้น (ใช้ข้อมูลจาก original file)"
         )
         note.setStyleSheet("color:#6b7280;")
         note.setWordWrap(True)
@@ -371,7 +354,9 @@ class SimpleTransformTool(QtWidgets.QWidget):
         r1.addWidget(self.btn_delete_apply)
         lay.addLayout(r1)
 
-        note = QtWidgets.QLabel("หมายเหตุ: การลบคือการลบทั้งแถวออกจาก Output (Original ไม่ถูกแก้ไข)")
+        note = QtWidgets.QLabel(
+            "หมายเหตุ: การลบคือการลบทั้งแถวจาก original file (ผลลัพธ์ไปแสดงใน Output preview)"
+        )
         note.setStyleSheet("color:#6b7280;")
         lay.addWidget(note)
         lay.addStretch(1)
@@ -419,6 +404,7 @@ class SimpleTransformTool(QtWidgets.QWidget):
         self.tabs.addTab(w, "Pad")
 
     def _init_tab_group(self):
+        """Group/Sum tab – dropdown version with mode toggle."""
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         lay.setContentsMargins(12, 12, 12, 12)
@@ -436,13 +422,15 @@ class SimpleTransformTool(QtWidgets.QWidget):
         ml.addWidget(self.radio_group_sum)
         lay.addWidget(mode_box)
 
-        # lists
-        lists = QtWidgets.QHBoxLayout()
-        self.grp_list = _CheckList("Group by (เลือกได้หลายคอลัมน์)")
-        self.sum_list = _CheckList("Sum columns (ตัวเลข)")
-        lists.addWidget(self.grp_list, 1)
-        lists.addWidget(self.sum_list, 1)
-        lay.addLayout(lists)
+        # dropdowns (single select)
+        form = QtWidgets.QFormLayout()
+        form.setLabelAlignment(QtCore.Qt.AlignRight)
+
+        self.ddl_group_by = QtWidgets.QComboBox()
+        self.ddl_sum_col = QtWidgets.QComboBox()
+        form.addRow("Group by column:", self.ddl_group_by)
+        form.addRow("Sum column:", self.ddl_sum_col)
+        lay.addLayout(form)
 
         bottom = QtWidgets.QHBoxLayout()
         self.btn_group_apply = QtWidgets.QPushButton("Run Group / Sum")
@@ -452,14 +440,40 @@ class SimpleTransformTool(QtWidgets.QWidget):
 
         note = QtWidgets.QLabel(
             "กติกา:\n"
-            "• Group only → เลือก Group by → ระบบจะคืนจำนวนแถวต่อกลุ่ม (count)\n"
-            "• Sum only → เลือกคอลัมน์ที่จะ Sum (ไม่มี Group) → ได้ 1 แถวรวม\n"
-            "• Group + Sum → เลือกทั้ง Group by และ Sum columns"
+            "• Group only → ใช้ Group by column จาก original แล้วคืน count ต่อกลุ่ม\n"
+            "• Sum only → ใช้ Sum column จาก original → ได้ผลรวม 1 แถว\n"
+            "• Group + Sum → Group ตาม Group by column แล้ว sum ตาม Sum column"
         )
         note.setStyleSheet("color:#6b7280;")
         note.setWordWrap(True)
         lay.addWidget(note)
         lay.addStretch(1)
+
+        # dynamic visibility
+        def update_group_sum_visibility():
+            if self.radio_group_only.isChecked():
+                # show only group
+                self.ddl_group_by.setVisible(True)
+                form.labelForField(self.ddl_group_by).setVisible(True)
+                self.ddl_sum_col.setVisible(False)
+                form.labelForField(self.ddl_sum_col).setVisible(False)
+            elif self.radio_sum_only.isChecked():
+                # show only sum
+                self.ddl_group_by.setVisible(False)
+                form.labelForField(self.ddl_group_by).setVisible(False)
+                self.ddl_sum_col.setVisible(True)
+                form.labelForField(self.ddl_sum_col).setVisible(True)
+            else:
+                # show both
+                self.ddl_group_by.setVisible(True)
+                form.labelForField(self.ddl_group_by).setVisible(True)
+                self.ddl_sum_col.setVisible(True)
+                form.labelForField(self.ddl_sum_col).setVisible(True)
+
+        self.radio_group_only.toggled.connect(update_group_sum_visibility)
+        self.radio_sum_only.toggled.connect(update_group_sum_visibility)
+        self.radio_group_sum.toggled.connect(update_group_sum_visibility)
+        update_group_sum_visibility()
 
         self.btn_group_apply.clicked.connect(self._do_group_sum)
         self.tabs.addTab(w, "Group / Sum")
@@ -514,7 +528,7 @@ class SimpleTransformTool(QtWidgets.QWidget):
 
         note = QtWidgets.QLabel(
             "ตัวอย่าง: Left=Column QTY, Operator=*, Right=Constant 7 → result = QTY*7\n"
-            "ระบบจะพยายามแปลงเป็นตัวเลขอัตโนมัติ และข้ามหารด้วยศูนย์ (ให้ค่าเป็นค่าว่าง)"
+            "ใช้ข้อมูลจาก original file ทุกครั้ง (ไม่ chain จาก Output เดิม)"
         )
         note.setStyleSheet("color:#6b7280;")
         note.setWordWrap(True)
@@ -586,12 +600,42 @@ class SimpleTransformTool(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, "Export error", str(e))
 
     def _refresh_column_widgets(self):
-        cols = list(self.df_out.columns) if isinstance(self.df_out, pd.DataFrame) else []
-        for cb in [self.trim_col, self.del_col, self.pad_col, self.cal_left_col, self.cal_right_col]:
+        """
+        Refresh combobox/dropdown columns.
+        ใช้ column จาก original file (df_orig) เสมอ ตาม Option 2
+        """
+        cols = list(self.df_orig.columns) if isinstance(self.df_orig, pd.DataFrame) else []
+
+        # combobox ทั่วไป
+        for cb in [
+            getattr(self, "trim_col", None),
+            getattr(self, "del_col", None),
+            getattr(self, "pad_col", None),
+            getattr(self, "cal_left_col", None),
+            getattr(self, "cal_right_col", None),
+        ]:
+            if cb is None:
+                continue
+            prev = cb.currentText()
             cb.clear()
             cb.addItems(cols)
-        self.grp_list.set_items(cols)
-        self.sum_list.set_items(cols)
+            if prev in cols:
+                cb.setCurrentText(prev)
+
+        # dropdown group / sum
+        if hasattr(self, "ddl_group_by") and hasattr(self, "ddl_sum_col"):
+            prev_group = self.ddl_group_by.currentText()
+            prev_sum = self.ddl_sum_col.currentText()
+
+            self.ddl_group_by.clear()
+            self.ddl_sum_col.clear()
+            self.ddl_group_by.addItems(cols)
+            self.ddl_sum_col.addItems(cols)
+
+            if prev_group in cols:
+                self.ddl_group_by.setCurrentText(prev_group)
+            if prev_sum in cols:
+                self.ddl_sum_col.setCurrentText(prev_sum)
 
     # ----- operations -----
     def _filter_mask(self, series: pd.Series, op: str, val: str) -> pd.Series:
@@ -611,13 +655,13 @@ class SimpleTransformTool(QtWidgets.QWidget):
         return s == val
 
     def _do_trim(self):
-        if self.df_out is None or self.df_out.empty:
+        if self.df_orig is None or self.df_orig.empty:
             return
         col = self.trim_col.currentText()
-        if not col or col not in self.df_out.columns:
+        if not col or col not in self.df_orig.columns:
             return
         with self._busy(f"Trimming '{col}'"):
-            df = self.df_out.copy()
+            df = self.df_orig.copy()
             s = df[col].astype(str)
 
             # filter
@@ -653,17 +697,17 @@ class SimpleTransformTool(QtWidgets.QWidget):
             self._refresh_column_widgets()
 
     def _do_delete(self):
-        if self.df_out is None or self.df_out.empty:
+        if self.df_orig is None or self.df_orig.empty:
             return
         col = self.del_col.currentText()
-        if not col or col not in self.df_out.columns:
+        if not col or col not in self.df_orig.columns:
             return
         val = self.del_val.text().strip()
         if not val:
             return
         op = self.del_op.currentText()
         with self._busy(f"Deleting rows from '{col}'"):
-            df = self.df_out.copy()
+            df = self.df_orig.copy()
             m = self._filter_mask(df[col], op, val)
             before = len(df)
             df = df.loc[~m].copy()
@@ -673,10 +717,10 @@ class SimpleTransformTool(QtWidgets.QWidget):
         QtWidgets.QMessageBox.information(self, "Delete", f"ลบ {removed} แถวเรียบร้อยแล้ว")
 
     def _do_pad(self):
-        if self.df_out is None or self.df_out.empty:
+        if self.df_orig is None or self.df_orig.empty:
             return
         col = self.pad_col.currentText()
-        if not col or col not in self.df_out.columns:
+        if not col or col not in self.df_orig.columns:
             return
         n = int(self.pad_len.value())
         if n <= 0:
@@ -685,7 +729,7 @@ class SimpleTransformTool(QtWidgets.QWidget):
         side = self.pad_side.currentText()
         only_shorter = self.chk_pad_only_shorter.isChecked()
         with self._busy(f"Padding '{col}'"):
-            df = self.df_out.copy()
+            df = self.df_orig.copy()
             s = df[col].astype(str)
             if only_shorter:
                 mask = s.str.len() < n
@@ -705,11 +749,10 @@ class SimpleTransformTool(QtWidgets.QWidget):
             self._refresh_column_widgets()
 
     def _do_group_sum(self):
-        if self.df_out is None or self.df_out.empty:
+        if self.df_orig is None or self.df_orig.empty:
             return
-        grp_cols = self.grp_list.selected_items()
-        sum_cols = self.sum_list.selected_items()
 
+        # Determine mode
         if self.radio_group_only.isChecked():
             mode = "group"
         elif self.radio_sum_only.isChecked():
@@ -717,47 +760,51 @@ class SimpleTransformTool(QtWidgets.QWidget):
         else:
             mode = "group+sum"
 
+        # Read selected columns from dropdowns
+        grp_col = self.ddl_group_by.currentText().strip()
+        sum_col = self.ddl_sum_col.currentText().strip()
+
         with self._busy("Running Group / Sum"):
-            df = self.df_out.copy()
+            df = self.df_orig.copy()
             if mode == "group":
-                if not grp_cols:
-                    QtWidgets.QMessageBox.information(self, "Group", "โปรดเลือก Group by columns อย่างน้อย 1 คอลัมน์")
+                if not grp_col or grp_col not in df.columns:
+                    QtWidgets.QMessageBox.information(self, "Group", "โปรดเลือก Group by column")
                     return
-                out = df.groupby(grp_cols, dropna=False).size().reset_index(name="count")
+                out = df.groupby([grp_col], dropna=False).size().reset_index(name="count")
+
             elif mode == "sum":
-                if not sum_cols:
-                    QtWidgets.QMessageBox.information(self, "Sum", "โปรดเลือกคอลัมน์ที่จะ Sum อย่างน้อย 1 คอลัมน์")
+                if not sum_col or sum_col not in df.columns:
+                    QtWidgets.QMessageBox.information(self, "Sum", "โปรดเลือก Sum column")
                     return
-                num_df = {}
-                for c in sum_cols:
-                    num_df[c] = _safe_numeric(df[c]).sum()
-                out = pd.DataFrame([num_df])
+                out_val = _safe_numeric(df[sum_col]).sum()
+                out = pd.DataFrame([{sum_col: out_val}])
+
             else:  # group+sum
-                if not grp_cols:
-                    QtWidgets.QMessageBox.information(self, "Group + Sum", "โปรดเลือก Group by columns อย่างน้อย 1 คอลัมน์")
+                if not grp_col or grp_col not in df.columns:
+                    QtWidgets.QMessageBox.information(self, "Group + Sum", "โปรดเลือก Group by column")
                     return
-                if not sum_cols:
-                    QtWidgets.QMessageBox.information(self, "Group + Sum", "โปรดเลือกคอลัมน์ที่จะ Sum อย่างน้อย 1 คอลัมน์")
+                if not sum_col or sum_col not in df.columns:
+                    QtWidgets.QMessageBox.information(self, "Group + Sum", "โปรดเลือก Sum column")
                     return
-                for c in sum_cols:
-                    df[c] = _safe_numeric(df[c])
-                out = df.groupby(grp_cols, dropna=False)[sum_cols].sum().reset_index()
+                df2 = df.copy()
+                df2[sum_col] = _safe_numeric(df2[sum_col])
+                out = df2.groupby([grp_col], dropna=False)[sum_col].sum().reset_index()
 
             self.df_out = out
             self._refresh_tables()
             self._refresh_column_widgets()
 
     def _do_calc(self):
-        if self.df_out is None or self.df_out.empty:
+        if self.df_orig is None or self.df_orig.empty:
             return
         outname = self.cal_result_name.text().strip() or "result"
 
         def _get_operand(is_col: bool, col_cb: QtWidgets.QComboBox, const_edit: QtWidgets.QLineEdit) -> pd.Series:
             if is_col:
                 col = col_cb.currentText()
-                if not col or col not in self.df_out.columns:
+                if not col or col not in self.df_orig.columns:
                     raise ValueError("กรุณาเลือกคอลัมน์ให้ครบ")
-                return _safe_numeric(self.df_out[col])
+                return _safe_numeric(self.df_orig[col])
             else:
                 txt = const_edit.text().strip()
                 if txt == "":
@@ -767,7 +814,7 @@ class SimpleTransformTool(QtWidgets.QWidget):
                         val = float(txt)
                     except Exception:
                         raise ValueError(f"ค่า constant ไม่ใช่ตัวเลข: {txt}")
-                return pd.Series([val] * len(self.df_out), index=self.df_out.index)
+                return pd.Series([val] * len(self.df_orig), index=self.df_orig.index)
 
         try:
             with self._busy("Computing"):
@@ -798,7 +845,7 @@ class SimpleTransformTool(QtWidgets.QWidget):
                 res = res.replace([pd.NA, float("inf"), float("-inf")], pd.NA)
                 out_col = res.astype(object).where(~pd.isna(res), "")
 
-                df = self.df_out.copy()
+                df = self.df_orig.copy()
                 df[outname] = out_col
                 self.df_out = df
                 self._refresh_tables()
