@@ -118,8 +118,8 @@ class HomePage(QtWidgets.QWidget):
         self._grid.setHorizontalSpacing(14)
         self._grid.setVerticalSpacing(14)
         self._grid.addWidget(btn_load_plugin, 0, 0)
-        self._grid.addWidget(btn_edit, 1, 0)
-        self._grid.addWidget(btn_compare, 1, 1)
+        # self._grid.addWidget(btn_edit, 1, 0)
+        self._grid.addWidget(btn_compare, 1, 0)
         # ถ้าต้องการแสดงปุ่ม Lookup บน Home ด้วย ให้ uncomment บรรทัดถัดไป
         # self._grid.addWidget(btn_lookup, 0, 1)
         self._next_row, self._next_col = 2, 0
