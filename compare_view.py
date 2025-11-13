@@ -254,6 +254,12 @@ class CompareWindow(QtWidgets.QMainWindow):
         self._status = self.statusBar()
         self._status.showMessage("Ready – Load A/B and set keys")
 
+        # progress tracking
+        self._prog_task: Optional[str] = None
+        self._prog_total: int = 0
+        self._prog_step: int = 0
+        self._prog_t0: float = 0.0
+
         self._build_page_setup()
         self._build_page_results()
         self._stack.setCurrentWidget(self.page_setup)
@@ -271,6 +277,53 @@ class CompareWindow(QtWidgets.QMainWindow):
             QtWidgets.QApplication.restoreOverrideCursor()
             dt = time.time() - t0
             self._status.showMessage(f"{done} ({dt:.2f}s)")
+
+    # ------------- progress helpers (Thai messages) -------------
+    def _start_progress(self, task: str, total_steps: int = 100):
+        """Start a simple percent progress in the status bar.
+
+        Shows messages like: "กำลังทำงาน: <task> 12%" and records start time.
+        """
+        try:
+            self._prog_task = task
+            self._prog_total = max(1, int(total_steps))
+            self._prog_step = 0
+            self._prog_t0 = time.time()
+            self._status.showMessage(f"กำลังทำงาน: {task} 0%")
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            # don't let progress helpers break the main flow
+            pass
+
+    def _update_progress(self, step_inc: int = 1, note: str = ""):
+        """Increment progress by step_inc and update status message.
+
+        note is optional extra text appended to message.
+        """
+        try:
+            if not self._prog_task:
+                return
+            self._prog_step = min(self._prog_total, self._prog_step + int(step_inc))
+            pct = (self._prog_step / self._prog_total) * 100
+            note_text = f" • {note}" if note else ""
+            self._status.showMessage(f"กำลังทำงาน: {self._prog_task} {pct:.0f}%{note_text}")
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _finish_progress(self, done_text: str = "เสร็จแล้ว"):
+        """Finish progress and show elapsed time in status bar."""
+        try:
+            dt = time.time() - (self._prog_t0 or time.time())
+            self._status.showMessage(f"{done_text} ({dt:.2f}s)")
+            QtWidgets.QApplication.processEvents()
+            # reset
+            self._prog_task = None
+            self._prog_total = 0
+            self._prog_step = 0
+            self._prog_t0 = 0.0
+        except Exception:
+            pass
 
     # ------------- pages -------------
     def _build_page_setup(self):
@@ -545,9 +598,14 @@ class CompareWindow(QtWidgets.QMainWindow):
             return
 
         with self._busy("Comparing (memory-safe)"):
+            # start progress: hashing A/B, set ops, build tables, optional valdiff per mapping
+            total_steps = 4 + (len(self._map_pairs) if self._map_pairs else 0)
+            self._start_progress("Comparing", total_steps=total_steps)
             # --- coverage / duplicates (เดิม) ---
             a_key = build_key_hash(df_a, keys_a)
+            self._update_progress(note="hashed A")
             b_key = build_key_hash(df_b, keys_b)
+            self._update_progress(note="hashed B")
 
             def dup_df(s: pd.Series, label: str) -> pd.DataFrame:
                 vc = s.value_counts(dropna=False)
@@ -587,6 +645,9 @@ class CompareWindow(QtWidgets.QMainWindow):
             kr_b = keyrows_b.set_index("h")
             keyrows_both = pd.concat([kr_a, kr_b.loc[lambda d: ~d.index.isin(kr_a.index)]], axis=0).reset_index()
             self._both_df = df_from_keys_with_keycols("both", both_sample, keyrows_both, [k for k in keys_a if k] or [k for k in keys_b if k])
+
+            # update progress after building basic tables
+            self._update_progress(step_inc=1, note="built coverage tables")
 
             inter = len(both)
             total_a = inter + len(only_a)
@@ -634,7 +695,12 @@ class CompareWindow(QtWidgets.QMainWindow):
             # --- value difference (NEW) ---
             self._valdiff_df = None
             if self._map_pairs:
+                # reserve remaining steps to value-diff comparisons
+                self._update_progress(step_inc=1, note="starting value-diff")
                 self._valdiff_df = self._compute_value_diff(df_a, df_b, keys_a, keys_b, both)
+
+            # finish progress for compare
+            self._finish_progress("Compare finished")
 
         # push to UI
         self.txt_summary.setHtml(self._summary_html)
@@ -681,6 +747,9 @@ class CompareWindow(QtWidgets.QMainWindow):
             merged = merged.loc[hk.astype("uint64").isin(list(both_keys))].copy()
 
         rows = []
+        # progress: update per mapping pair when available
+        total_maps = len(self._map_pairs) if self._map_pairs else 0
+        map_idx = 0
         # ฟังก์ชันช่วยเช็ค numeric tolerance
         def pass_numeric(a, b) -> Tuple[bool, float]:
             a = pd.to_numeric(pd.Series([a]), errors="coerce").iloc[0]
@@ -741,6 +810,13 @@ class CompareWindow(QtWidgets.QMainWindow):
                     mism["diff"] = diffv.loc[mism.index].values
                     mism["rule"] = mism.apply(lambda r: f"abs≤{self._abs_tol} or pct≤{self._pct_tol*100:.2f}%", axis=1)
                     rows.append(mism[on_keys + ["mapped_column","A_value","B_value","diff","rule"]])
+            # progress increment for this mapping
+            try:
+                map_idx += 1
+                # note like "colA↔colB"
+                self._update_progress(step_inc=1, note=f"{a_col}↔{b_col}")
+            except Exception:
+                pass
             else:
                 # Text compare: เท่ากันแบบตรงตัว (trim)
                 sa = sub[a_name].astype(str).str.strip()
@@ -754,7 +830,23 @@ class CompareWindow(QtWidgets.QMainWindow):
                     mism["rule"] = "text_equal"
                     rows.append(mism[on_keys + ["mapped_column","A_value","B_value","diff","rule"]])
 
+            # progress increment for this mapping (after numeric/text compare)
+            try:
+                map_idx += 1
+                self._update_progress(step_inc=1, note=f"{a_col}↔{b_col}")
+            except Exception:
+                pass
+
         if not rows:
+            # if there was no mismatch, still update progress finish for maps
+            try:
+                if total_maps and getattr(self, '_prog_task', None):
+                    # ensure progress gets to the end of the reserved map steps
+                    remaining = max(0, total_maps - map_idx)
+                    if remaining:
+                        self._update_progress(step_inc=remaining)
+            except Exception:
+                pass
             return pd.DataFrame(columns=on_keys + ["mapped_column","A_value","B_value","diff","rule"])
         out = pd.concat(rows, ignore_index=True)
         return out
@@ -784,6 +876,8 @@ class CompareWindow(QtWidgets.QMainWindow):
             return
         try:
             with self._busy("Exporting coverage"):
+                # progress: simple two-step (prepare -> write)
+                self._start_progress("Exporting coverage", total_steps=2)
                 if str(path).lower().endswith(".csv"):
                     parts = []
                     if self._only_a_df is not None: parts.append(self._only_a_df.assign(section="OnlyA"))
@@ -795,6 +889,9 @@ class CompareWindow(QtWidgets.QMainWindow):
                         if self._only_a_df is not None: self._only_a_df.to_excel(xw, index=False, sheet_name="OnlyA")
                         if self._only_b_df is not None: self._only_b_df.to_excel(xw, index=False, sheet_name="OnlyB")
                         if self._both_df is not None: self._both_df.to_excel(xw, index=False, sheet_name="Both_sample")
+                # mark write step
+                self._update_progress(step_inc=1, note="saved file")
+                self._finish_progress("Export finished")
             QtWidgets.QMessageBox.information(self, "Export", f"บันทึกแล้ว: {path}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Export error", str(e))
@@ -809,6 +906,7 @@ class CompareWindow(QtWidgets.QMainWindow):
             return
         try:
             with self._busy("Exporting duplicates"):
+                self._start_progress("Exporting duplicates", total_steps=2)
                 if str(path).lower().endswith(".csv"):
                     parts = []
                     if self._dup_a_df is not None: parts.append(self._dup_a_df.assign(section="DupA"))
@@ -818,6 +916,8 @@ class CompareWindow(QtWidgets.QMainWindow):
                     with pd.ExcelWriter(path) as xw:
                         if self._dup_a_df is not None: self._dup_a_df.to_excel(xw, index=False, sheet_name="DupA")
                         if self._dup_b_df is not None: self._dup_b_df.to_excel(xw, index=False, sheet_name="DupB")
+                self._update_progress(step_inc=1, note="saved file")
+                self._finish_progress("Export finished")
             QtWidgets.QMessageBox.information(self, "Export", f"บันทึกแล้ว: {path}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Export error", str(e))
@@ -832,11 +932,14 @@ class CompareWindow(QtWidgets.QMainWindow):
             return
         try:
             with self._busy("Exporting value diff"):
+                self._start_progress("Exporting value diff", total_steps=2)
                 if str(path).lower().endswith(".csv"):
                     self._valdiff_df.to_csv(path, index=False, encoding="utf-8")
                 else:
                     with pd.ExcelWriter(path) as xw:
                         self._valdiff_df.to_excel(xw, index=False, sheet_name="ValueDiff")
+                self._update_progress(step_inc=1, note="saved file")
+                self._finish_progress("Export finished")
             QtWidgets.QMessageBox.information(self, "Export", f"บันทึกแล้ว: {path}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Export error", str(e))
