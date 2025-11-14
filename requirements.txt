@@ -1,0 +1,17 @@
+# Core GUI
+PyQt5>=5.15.9
+
+# Data processing
+pandas>=2.2.2
+openpyxl>=3.1.2        # สำหรับ export Excel
+xlrd>=2.0.1            # สำหรับอ่านไฟล์ Excel รุ่นเก่า (.xls)
+
+# Optional encoding/CSV stability (recommended)
+python-dateutil>=2.9.0
+chardet>=5.2.0
+
+# For plugins (บางปลั๊กอินอ่าน Excel/csv แบบหลากหลาย)
+numpy>=1.26.4
+
+# Only needed if using PyInstaller
+pyinstaller>=6.6.0
