@@ -385,13 +385,15 @@ class CompareWindow(QtWidgets.QMainWindow):
 
         hdr = QtWidgets.QHBoxLayout()
         self.btn_back = QtWidgets.QPushButton("← Back to Setup")
+        self.btn_save_report = QtWidgets.QPushButton("📋 Save Summary Report…")
         self.btn_export_cov = QtWidgets.QPushButton("📤 Export coverage…")
         self.btn_export_mm = QtWidgets.QPushButton("📤 Export duplicates…")
         self.btn_export_val = QtWidgets.QPushButton("📤 Export value diff…")  # NEW
-        for b in (self.btn_export_cov, self.btn_export_mm, self.btn_export_val):
+        for b in (self.btn_save_report, self.btn_export_cov, self.btn_export_mm, self.btn_export_val):
             b.setEnabled(False)
         hdr.addWidget(self.btn_back)
         hdr.addStretch(1)
+        hdr.addWidget(self.btn_save_report)
         hdr.addWidget(self.btn_export_cov)
         hdr.addWidget(self.btn_export_mm)
         hdr.addWidget(self.btn_export_val)
@@ -457,6 +459,7 @@ class CompareWindow(QtWidgets.QMainWindow):
         self._stack.addWidget(self.page_results)
 
         self.btn_back.clicked.connect(lambda: self._stack.setCurrentWidget(self.page_setup))
+        self.btn_save_report.clicked.connect(self._save_summary_report)
         self.btn_export_cov.clicked.connect(self._export_coverage)
         self.btn_export_mm.clicked.connect(self._export_duplicates)
         self.btn_export_val.clicked.connect(self._export_valdiff)  # NEW
@@ -597,15 +600,31 @@ class CompareWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "Keys", "โปรดตั้งคีย์ให้ครบ (จำนวนคีย์สองฝั่งต้องเท่ากัน)")
             return
 
-        with self._busy("Comparing (memory-safe)"):
-            # start progress: hashing A/B, set ops, build tables, optional valdiff per mapping
-            total_steps = 4 + (len(self._map_pairs) if self._map_pairs else 0)
-            self._start_progress("Comparing", total_steps=total_steps)
-            # --- coverage / duplicates (เดิม) ---
-            a_key = build_key_hash(df_a, keys_a)
-            self._update_progress(note="hashed A")
-            b_key = build_key_hash(df_b, keys_b)
-            self._update_progress(note="hashed B")
+        with self._busy("เปรียบเทียบข้อมูล (ประหยัดหน่วยความจำ)"):
+            # start progress: chunked hashing, set ops, build tables, optional valdiff per mapping
+            chunk_size = 50000
+            num_chunks_a = (len(df_a) + chunk_size - 1) // chunk_size
+            num_chunks_b = (len(df_b) + chunk_size - 1) // chunk_size
+            total_steps = 4 + num_chunks_a + num_chunks_b + (len(self._map_pairs) if self._map_pairs else 0)
+            self._start_progress("เปรียบเทียบ (Chunked)", total_steps=total_steps)
+            
+            # --- coverage / duplicates (chunked hashing) ---
+            # Hash in chunks to avoid memory spike on large files
+            a_key_parts = []
+            for chunk_idx in range(0, len(df_a), chunk_size):
+                chunk = df_a.iloc[chunk_idx:chunk_idx+chunk_size]
+                a_key_parts.append(build_key_hash(chunk, keys_a))
+                self._update_progress(note=f"แฮช A chunk {(chunk_idx // chunk_size) + 1}/{num_chunks_a}")
+                QtWidgets.QApplication.processEvents()
+            a_key = pd.concat(a_key_parts, ignore_index=False)
+            
+            b_key_parts = []
+            for chunk_idx in range(0, len(df_b), chunk_size):
+                chunk = df_b.iloc[chunk_idx:chunk_idx+chunk_size]
+                b_key_parts.append(build_key_hash(chunk, keys_b))
+                self._update_progress(note=f"แฮช B chunk {(chunk_idx // chunk_size) + 1}/{num_chunks_b}")
+                QtWidgets.QApplication.processEvents()
+            b_key = pd.concat(b_key_parts, ignore_index=False)
 
             def dup_df(s: pd.Series, label: str) -> pd.DataFrame:
                 vc = s.value_counts(dropna=False)
@@ -617,8 +636,9 @@ class CompareWindow(QtWidgets.QMainWindow):
                 out["key"] = out["key"].astype("UInt64")
                 return out
 
-            self._dup_a_df = dup_df(a_key, "File 1")
-            self._dup_b_df = dup_df(b_key, "File 2")
+            self._dup_a_df = dup_df(a_key, "ไฟล์ 1")
+            self._dup_b_df = dup_df(b_key, "ไฟล์ 2")
+            self._update_progress(note="คำนวณคีย์ซ้ำแล้ว")
 
             try:
                 a_unique = a_key[~a_key.duplicated(dropna=False)].dropna().astype("uint64")
@@ -647,46 +667,61 @@ class CompareWindow(QtWidgets.QMainWindow):
             self._both_df = df_from_keys_with_keycols("both", both_sample, keyrows_both, [k for k in keys_a if k] or [k for k in keys_b if k])
 
             # update progress after building basic tables
-            self._update_progress(step_inc=1, note="built coverage tables")
+            self._update_progress(step_inc=1, note="สร้างตารางครอบคลุมแล้ว")
 
             inter = len(both)
             total_a = inter + len(only_a)
             total_b = inter + len(only_b)
             union = len(a_set | b_set)
             jacc = (inter / union) if union else 0.0
-            status = "MATCHED" if (len(only_a) == 0 and len(only_b) == 0) else ("PARTIAL MATCH" if inter > 0 else "NO MATCH")
-            color = "#10b981" if status == "MATCHED" else ("#f59e0b" if inter > 0 else "#ef4444")
-            key_list_a = ", ".join(keys_a) or "None"
-            key_list_b = ", ".join(keys_b) or "None"
+            
+            # Determine status
+            if len(only_a) == 0 and len(only_b) == 0:
+                status = "✅ ตรงกันทั้งหมด (MATCHED)"
+                color = "#10b981"
+            elif inter > 0:
+                status = "⚠️ ตรงกันบางส่วน (PARTIAL MATCH)"
+                color = "#f59e0b"
+            else:
+                status = "❌ ไม่ตรงกัน (NO MATCH)"
+                color = "#ef4444"
+            
+            key_list_a = ", ".join(keys_a) or "ไม่มี"
+            key_list_b = ", ".join(keys_b) or "ไม่มี"
 
             html = f"""
-              <div style='font-family:Segoe UI,Roboto,Arial'>
-                <div style='padding:12px 16px;border-radius:10px;background:{color}20;border:1px solid {color};margin-bottom:12px;'>
-                  <div style='font-size:20px;font-weight:700;color:{color};'>✅ {status}</div>
-                  <div style='margin-top:4px;color:#333;'>After filters and optional aggregation (if applied).</div>
+              <div style='font-family:Segoe UI,Roboto,Arial;line-height:1.6;'>
+                <div style='padding:12px 16px;border-radius:10px;background:{color}20;border:2px solid {color};margin-bottom:12px;'>
+                  <div style='font-size:18px;font-weight:700;color:{color};'>{status}</div>
+                  <div style='margin-top:4px;color:#555;font-size:13px;'>หลังจากใช้ตัวกรอง และการรวมข้อมูล (ถ้ามี)</div>
                 </div>
-                <div style='display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap;'>
-                  <div style='flex:1;min-width:200px;padding:10px;border:1px solid #e5e7eb;border-radius:10px;'>
-                    <div style='font-size:12px;color:#6b7280;'>Coverage (A by B)</div>
-                    <div style='font-size:24px;font-weight:700;'>{(inter/total_a*100 if total_a else 0):.2f}%</div>
-                    <div style='font-size:12px;color:#6b7280;'>File 1 unique keys = {total_a}</div>
+                
+                <div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px;'>
+                  <div style='padding:12px;border:1px solid #ddd;border-radius:8px;background:#f9fafb;'>
+                    <div style='font-size:12px;color:#6b7280;font-weight:600;'>ไฟล์ 1 ตรงกับไฟล์ 2</div>
+                    <div style='font-size:28px;font-weight:700;color:{color};margin:8px 0;'>{(inter/total_a*100 if total_a else 0):.1f}%</div>
+                    <div style='font-size:11px;color:#666;'>คีย์เฉพาะ = {total_a:,} แถว</div>
                   </div>
-                  <div style='flex:1;min-width:200px;padding:10px;border:1px solid #e5e7eb;border-radius:10px;'>
-                    <div style='font-size:12px;color:#6b7280;'>Coverage (B by A)</div>
-                    <div style='font-size:24px;font-weight:700;'>{(inter/total_b*100 if total_b else 0):.2f}%</div>
-                    <div style='font-size:12px;color:#6b7280;'>File 2 unique keys = {total_b}</div>
+                  <div style='padding:12px;border:1px solid #ddd;border-radius:8px;background:#f9fafb;'>
+                    <div style='font-size:12px;color:#6b7280;font-weight:600;'>ไฟล์ 2 ตรงกับไฟล์ 1</div>
+                    <div style='font-size:28px;font-weight:700;color:{color};margin:8px 0;'>{(inter/total_b*100 if total_b else 0):.1f}%</div>
+                    <div style='font-size:11px;color:#666;'>คีย์เฉพาะ = {total_b:,} แถว</div>
                   </div>
-                  <div style='flex:1;min-width:200px;padding:10px;border:1px solid #e5e7eb;border-radius:10px;'>
-                    <div style='font-size:12px;color:#6b7280;'>Jaccard match</div>
-                    <div style='font-size:24px;font-weight:700;'>{jacc*100:.2f}%</div>
-                    <div style='font-size:12px;color:#6b7280;'>Intersection = {inter} / Union = {union}</div>
+                  <div style='padding:12px;border:1px solid #ddd;border-radius:8px;background:#f9fafb;'>
+                    <div style='font-size:12px;color:#6b7280;font-weight:600;'>ความคล้ายคลึง (Jaccard)</div>
+                    <div style='font-size:28px;font-weight:700;color:{color};margin:8px 0;'>{jacc*100:.1f}%</div>
+                    <div style='font-size:11px;color:#666;'>ตรงกัน {inter:,} / รวม {union:,}</div>
                   </div>
                 </div>
-                <div style='margin:12px 0;font-size:13px;color:#374151;'>
-                  <b>Keys used</b> — File 1: <code>{key_list_a}</code> • File 2: <code>{key_list_b}</code>
+                
+                <div style='margin:12px 0;padding:10px;background:#f0f4f8;border-radius:6px;font-size:12px;color:#333;'>
+                  <b>คีย์ที่ใช้:</b><br/>
+                  📄 ไฟล์ 1: <code style='background:#fff;padding:2px 6px;border-radius:3px;'>{key_list_a}</code><br/>
+                  📄 ไฟล์ 2: <code style='background:#fff;padding:2px 6px;border-radius:3px;'>{key_list_b}</code>
                 </div>
-                <div style='margin-top:6px;font-size:12px;color:#6b7280'>
-                  Preview "Both" limited to {SAMPLE} keys for performance. Use Export for full results.
+                
+                <div style='margin-top:8px;padding:8px;border-left:3px solid #2563eb;background:#eff6ff;font-size:11px;color:#555;'>
+                  💡 ตัวอย่าง "ตรงกัน" จำกัดที่ {SAMPLE:,} คีย์เพื่อให้เร็ว | ใช้ "ส่งออก" เพื่อดูผลเต็ม
                 </div>
               </div>
             """
@@ -696,11 +731,11 @@ class CompareWindow(QtWidgets.QMainWindow):
             self._valdiff_df = None
             if self._map_pairs:
                 # reserve remaining steps to value-diff comparisons
-                self._update_progress(step_inc=1, note="starting value-diff")
+                self._update_progress(step_inc=1, note="เริ่มเปรียบเทียบค่า")
                 self._valdiff_df = self._compute_value_diff(df_a, df_b, keys_a, keys_b, both)
 
             # finish progress for compare
-            self._finish_progress("Compare finished")
+            self._finish_progress("เปรียบเทียบเสร็จแล้ว ✅")
 
         # push to UI
         self.txt_summary.setHtml(self._summary_html)
@@ -711,13 +746,14 @@ class CompareWindow(QtWidgets.QMainWindow):
         self._set_table(self.tbl_dup_b, self._dup_b_df)
         self._set_table(self.tbl_valdiff, self._valdiff_df)
 
+        self.btn_save_report.setEnabled(True)
         self.btn_export_cov.setEnabled(True)
         self.btn_export_mm.setEnabled(True)
         self.btn_export_val.setEnabled(self._valdiff_df is not None and len(self._valdiff_df) > 0)
 
         self._stack.setCurrentWidget(self.page_results)
-        more = f" ValDiff:{len(self._valdiff_df)}" if isinstance(self._valdiff_df, pd.DataFrame) else ""
-        self._status.showMessage(f"Compare done ✅ – OnlyA:{len(self._only_a_df)} OnlyB:{len(self._only_b_df)} Both(sample):{len(self._both_df)}{more}")
+        more = f" ค่าไม่ตรง:{len(self._valdiff_df):,}" if isinstance(self._valdiff_df, pd.DataFrame) and len(self._valdiff_df) > 0 else ""
+        self._status.showMessage(f"เปรียบเทียบเสร็จ ✅ – เฉพาะไฟล์1:{len(self._only_a_df):,} เฉพาะไฟล์2:{len(self._only_b_df):,} ตรงกัน(ตัวอย่าง):{len(self._both_df):,}{more}")
 
     def _compute_value_diff(self, df_a: pd.DataFrame, df_b: pd.DataFrame,
                             keys_a: List[str], keys_b: List[str], both_keys: Iterable[int]) -> pd.DataFrame:
@@ -865,84 +901,457 @@ class CompareWindow(QtWidgets.QMainWindow):
                 tv.setColumnHidden(col, False)
         tv.resizeColumnsToContents()
 
+    # ------------- save summary report (HTML for Lead/PO) -------------
+    def _save_summary_report(self):
+        """Save a professional HTML report for Lead/PO with all comparison details"""
+        import datetime
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "บันทึก Summary Report", "comparison_report.html",
+                                                        "HTML (*.html)")
+        if not path:
+            return
+        try:
+            with self._busy("บันทึก Summary Report"):
+                self._start_progress("บันทึก Summary Report", total_steps=1)
+                
+                # Generate HTML report
+                html = self._generate_summary_report_html()
+                
+                # Write to file
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(html)
+                
+                self._update_progress(step_inc=1, note="บันทึกแล้ว")
+                self._finish_progress("บันทึกรายงาน ✅")
+            
+            QtWidgets.QMessageBox.information(self, "บันทึก", f"✅ บันทึก Summary Report สำเร็จที่:\n{path}\n\nสามารถเปิดด้วย Browser เพื่อดูรายงาน")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "ข้อผิดพลาด", f"ไม่สามารถบันทึกรายงานได้: {e}")
+
+    def _generate_summary_report_html(self) -> str:
+        """Generate professional HTML report"""
+        import datetime
+        from pathlib import Path
+        
+        now = datetime.datetime.now()
+        timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Get file info
+        file_a_path = self.block_a.path_edit.text().strip()
+        file_b_path = self.block_b.path_edit.text().strip()
+        file_a_name = Path(file_a_path).name if file_a_path else "N/A"
+        file_b_name = Path(file_b_path).name if file_b_path else "N/A"
+        keys_a = self.block_a.keys()
+        keys_b = self.block_b.keys()
+        
+        # Counts
+        only_a_count = len(self._only_a_df) if isinstance(self._only_a_df, pd.DataFrame) else 0
+        only_b_count = len(self._only_b_df) if isinstance(self._only_b_df, pd.DataFrame) else 0
+        both_count = len(self._both_df) if isinstance(self._both_df, pd.DataFrame) else 0
+        dup_a_count = len(self._dup_a_df) if isinstance(self._dup_a_df, pd.DataFrame) else 0
+        dup_b_count = len(self._dup_b_df) if isinstance(self._dup_b_df, pd.DataFrame) else 0
+        valdiff_count = len(self._valdiff_df) if isinstance(self._valdiff_df, pd.DataFrame) else 0
+        
+        total_keys_a = len(self.df_a) if self.df_a is not None else 0
+        total_keys_b = len(self.df_b) if self.df_b is not None else 0
+        
+        # Calculate coverage %
+        cov_a = (both_count / total_keys_a * 100) if total_keys_a > 0 else 0
+        cov_b = (both_count / total_keys_b * 100) if total_keys_b > 0 else 0
+        
+        # Status
+        if only_a_count == 0 and only_b_count == 0 and valdiff_count == 0:
+            status = "✅ ตรงกันทั้งหมด (FULLY MATCHED)"
+            status_color = "#22c55e"
+        elif valdiff_count == 0:
+            status = "⚠️ ตรงกัน (ไม่มี duplicate/coverage issue ในหลัก key)"
+            status_color = "#eab308"
+        else:
+            status = "⚠️ ตรงกันบางส่วน (มี value mismatch)"
+            status_color = "#f97316"
+        
+        # Build HTML
+        html = f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>เปรียบเทียบข้อมูล – Summary Report</title>
+    <style>
+        * {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }}
+        body {{
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
+        }}
+        .container {{
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            padding: 30px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .header {{
+            text-align: center;
+            border-bottom: 3px solid #0066cc;
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }}
+        .header h1 {{
+            margin: 0;
+            color: #0066cc;
+            font-size: 28px;
+        }}
+        .header .timestamp {{
+            color: #666;
+            margin-top: 10px;
+            font-size: 14px;
+        }}
+        .status-card {{
+            background: {status_color};
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+            text-align: center;
+            font-size: 18px;
+            font-weight: bold;
+        }}
+        .grid {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+        }}
+        .card {{
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 20px;
+        }}
+        .card h2 {{
+            margin-top: 0;
+            color: #1f2937;
+            font-size: 16px;
+            border-bottom: 2px solid #0066cc;
+            padding-bottom: 10px;
+        }}
+        .metric {{
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #e5e7eb;
+        }}
+        .metric:last-child {{
+            border-bottom: none;
+        }}
+        .metric-label {{
+            color: #666;
+            font-weight: 500;
+        }}
+        .metric-value {{
+            color: #0066cc;
+            font-weight: bold;
+            font-size: 14px;
+        }}
+        .metric-percent {{
+            color: #059669;
+            font-weight: bold;
+        }}
+        .section {{
+            margin-top: 30px;
+            border-top: 2px solid #e5e7eb;
+            padding-top: 20px;
+        }}
+        .section h3 {{
+            color: #1f2937;
+            margin-top: 0;
+            border-bottom: 2px solid #0066cc;
+            padding-bottom: 10px;
+        }}
+        .detail {{
+            background: #f0f9ff;
+            padding: 12px;
+            border-left: 4px solid #0066cc;
+            margin: 10px 0;
+            border-radius: 4px;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            font-size: 13px;
+        }}
+        th {{
+            background: #0066cc;
+            color: white;
+            padding: 10px;
+            text-align: left;
+            font-weight: bold;
+        }}
+        td {{
+            padding: 8px 10px;
+            border-bottom: 1px solid #e5e7eb;
+        }}
+        tr:nth-child(even) {{
+            background: #f9fafb;
+        }}
+        .footer {{
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 2px solid #e5e7eb;
+            color: #666;
+            font-size: 12px;
+            text-align: center;
+        }}
+        .signature {{
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 30px;
+            margin-top: 30px;
+            text-align: center;
+        }}
+        .sig-line {{
+            height: 1px;
+            background: #000;
+            margin: 5px 0;
+        }}
+        .warning {{
+            background: #fff7ed;
+            border-left: 4px solid #ea580c;
+            padding: 12px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }}
+        .success {{
+            background: #f0fdf4;
+            border-left: 4px solid #16a34a;
+            padding: 12px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Reconciliation Comparison Report</h1>
+            <div class="timestamp">{timestamp}</div>
+        </div>
+        
+        <div class="status-card">{status}</div>
+        
+        <div class="grid">
+            <div class="card">
+                <h2>📄 File 1 (A)</h2>
+                <div class="metric">
+                    <span class="metric-label">ชื่อไฟล์:</span>
+                    <span>{file_a_name}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">จำนวนแถว:</span>
+                    <span class="metric-value">{total_keys_a:,}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">ตรงกัน:</span>
+                    <span class="metric-value">{both_count:,} <span class="metric-percent">({cov_a:.1f}%)</span></span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">เฉพาะไฟล์นี้:</span>
+                    <span class="metric-value">{only_a_count:,}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">คีย์ซ้ำ:</span>
+                    <span class="metric-value">{dup_a_count:,}</span>
+                </div>
+                <div class="detail">
+                    <strong>คีย์:</strong> {', '.join(keys_a) if keys_a else 'N/A'}
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>📄 File 2 (B)</h2>
+                <div class="metric">
+                    <span class="metric-label">ชื่อไฟล์:</span>
+                    <span>{file_b_name}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">จำนวนแถว:</span>
+                    <span class="metric-value">{total_keys_b:,}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">ตรงกัน:</span>
+                    <span class="metric-value">{both_count:,} <span class="metric-percent">({cov_b:.1f}%)</span></span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">เฉพาะไฟล์นี้:</span>
+                    <span class="metric-value">{only_b_count:,}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">คีย์ซ้ำ:</span>
+                    <span class="metric-value">{dup_b_count:,}</span>
+                </div>
+                <div class="detail">
+                    <strong>คีย์:</strong> {', '.join(keys_b) if keys_b else 'N/A'}
+                </div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h3>📈 สรุปผลการเปรียบเทียบ</h3>
+            <table>
+                <tr>
+                    <th>หมวดหมู่</th>
+                    <th>จำนวน</th>
+                    <th>หมายเหตุ</th>
+                </tr>
+                <tr>
+                    <td>✅ ตรงกัน (ทั้งสองไฟล์)</td>
+                    <td style="color: #16a34a; font-weight: bold;">{both_count:,}</td>
+                    <td>Data integrity OK</td>
+                </tr>
+                <tr>
+                    <td>⚠️ เฉพาะไฟล์ 1 เท่านั้น</td>
+                    <td style="color: #ea580c; font-weight: bold;">{only_a_count:,}</td>
+                    <td>Missing in File B</td>
+                </tr>
+                <tr>
+                    <td>⚠️ เฉพาะไฟล์ 2 เท่านั้น</td>
+                    <td style="color: #ea580c; font-weight: bold;">{only_b_count:,}</td>
+                    <td>Missing in File A</td>
+                </tr>
+                <tr>
+                    <td>❌ ค่าไม่ตรงกัน</td>
+                    <td style="color: #dc2626; font-weight: bold;">{valdiff_count:,}</td>
+                    <td>Value mismatch in mapped columns</td>
+                </tr>
+                <tr>
+                    <td>🔄 คีย์ซ้ำ (A)</td>
+                    <td style="color: #0066cc; font-weight: bold;">{dup_a_count:,}</td>
+                    <td>Duplicate keys in File A</td>
+                </tr>
+                <tr>
+                    <td>🔄 คีย์ซ้ำ (B)</td>
+                    <td style="color: #0066cc; font-weight: bold;">{dup_b_count:,}</td>
+                    <td>Duplicate keys in File B</td>
+                </tr>
+            </table>
+        </div>
+        
+        <div class="section">
+            <h3>✅ ข้อเสนอแนะ</h3>
+"""
+        
+        # Add recommendations
+        if only_a_count > 0:
+            html += f'<div class="warning">🔍 มีข้อมูลจำนวน {only_a_count:,} แถวใน File 1 ที่ไม่ปรากฏใน File 2 ควรตรวจสอบว่าเป็นข้อมูลใหม่หรือข้อมูลเดิม</div>'
+        
+        if only_b_count > 0:
+            html += f'<div class="warning">🔍 มีข้อมูลจำนวน {only_b_count:,} แถวใน File 2 ที่ไม่ปรากฏใน File 1 ควรตรวจสอบว่าเป็นข้อมูลใหม่หรือข้อมูลเดิม</div>'
+        
+        if valdiff_count > 0:
+            html += f'<div class="warning">❌ พบค่าไม่ตรงกัน {valdiff_count:,} แถว ในส่วนของ mapping columns - ต้องตรวจสอบและแก้ไขต่อ</div>'
+        
+        if dup_a_count > 0:
+            html += f'<div class="warning">⚠️ File 1 มีคีย์ที่ซ้ำกัน {dup_a_count:,} ชุด - ควรทำความเข้าใจเหตุผล</div>'
+        
+        if dup_b_count > 0:
+            html += f'<div class="warning">⚠️ File 2 มีคีย์ที่ซ้ำกัน {dup_b_count:,} ชุด - ควรทำความเข้าใจเหตุผล</div>'
+        
+        if only_a_count == 0 and only_b_count == 0 and valdiff_count == 0 and dup_a_count == 0 and dup_b_count == 0:
+            html += '<div class="success">🎉 ยอดเยี่ยม! ข้อมูลตรงกันทั้งหมด ไม่มีปัญหา</div>'
+        
+        html += """
+        </div>
+        
+        <div class="footer">
+            <p>📋 Report generated by Fulfillment Reconcile GUI</p>
+            <p>💡 สำหรับคำถามหรือปัญหา กรุณาติดต่อ Data Team</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        return html
+
     # ------------- exporters -------------
     def _export_coverage(self):
         if self._only_a_df is None and self._only_b_df is None and self._both_df is None:
-            QtWidgets.QMessageBox.information(self, "Export", "ยังไม่มีผล Compare")
+            QtWidgets.QMessageBox.information(self, "ส่งออก", "ยังไม่มีผลการเปรียบเทียบ")
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save coverage (Excel/CSV)", "coverage.xlsx",
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "บันทึกการครอบคลุม", "coverage.xlsx",
                                                         "Excel (*.xlsx);;CSV (*.csv)")
         if not path:
             return
         try:
-            with self._busy("Exporting coverage"):
+            with self._busy("ส่งออกการครอบคลุม"):
                 # progress: simple two-step (prepare -> write)
-                self._start_progress("Exporting coverage", total_steps=2)
+                self._start_progress("ส่งออกการครอบคลุม", total_steps=2)
                 if str(path).lower().endswith(".csv"):
                     parts = []
-                    if self._only_a_df is not None: parts.append(self._only_a_df.assign(section="OnlyA"))
-                    if self._only_b_df is not None: parts.append(self._only_b_df.assign(section="OnlyB"))
-                    if self._both_df is not None: parts.append(self._both_df.assign(section="Both (sample)"))
+                    if self._only_a_df is not None: parts.append(self._only_a_df.assign(section="เฉพาะไฟล์1"))
+                    if self._only_b_df is not None: parts.append(self._only_b_df.assign(section="เฉพาะไฟล์2"))
+                    if self._both_df is not None: parts.append(self._both_df.assign(section="ตรงกัน(ตัวอย่าง)"))
                     pd.concat(parts, ignore_index=True).to_csv(path, index=False, encoding="utf-8")
                 else:
                     with pd.ExcelWriter(path) as xw:
-                        if self._only_a_df is not None: self._only_a_df.to_excel(xw, index=False, sheet_name="OnlyA")
-                        if self._only_b_df is not None: self._only_b_df.to_excel(xw, index=False, sheet_name="OnlyB")
-                        if self._both_df is not None: self._both_df.to_excel(xw, index=False, sheet_name="Both_sample")
+                        if self._only_a_df is not None: self._only_a_df.to_excel(xw, index=False, sheet_name="เฉพาะไฟล์1")
+                        if self._only_b_df is not None: self._only_b_df.to_excel(xw, index=False, sheet_name="เฉพาะไฟล์2")
+                        if self._both_df is not None: self._both_df.to_excel(xw, index=False, sheet_name="ตรงกัน_ตัวอย่าง")
                 # mark write step
-                self._update_progress(step_inc=1, note="saved file")
-                self._finish_progress("Export finished")
-            QtWidgets.QMessageBox.information(self, "Export", f"บันทึกแล้ว: {path}")
+                self._update_progress(step_inc=1, note="บันทึกไฟล์แล้ว")
+                self._finish_progress("ส่งออกเสร็จแล้ว ✅")
+            QtWidgets.QMessageBox.information(self, "ส่งออก", f"✅ บันทึกสำเร็จที่:\n{path}")
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Export error", str(e))
+            QtWidgets.QMessageBox.critical(self, "ข้อผิดพลาด", f"ไม่สามารถส่งออกได้: {e}")
 
     def _export_duplicates(self):
         if self._dup_a_df is None and self._dup_b_df is None:
-            QtWidgets.QMessageBox.information(self, "Export", "ยังไม่มี Duplicate keys")
+            QtWidgets.QMessageBox.information(self, "ส่งออก", "ไม่มีคีย์ที่ซ้ำกัน")
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save duplicates (Excel/CSV)", "duplicates.xlsx",
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "บันทึกคีย์ที่ซ้ำ", "duplicates.xlsx",
                                                         "Excel (*.xlsx);;CSV (*.csv)")
         if not path:
             return
         try:
-            with self._busy("Exporting duplicates"):
-                self._start_progress("Exporting duplicates", total_steps=2)
+            with self._busy("ส่งออกคีย์ที่ซ้ำ"):
+                self._start_progress("ส่งออกคีย์ที่ซ้ำ", total_steps=2)
                 if str(path).lower().endswith(".csv"):
                     parts = []
-                    if self._dup_a_df is not None: parts.append(self._dup_a_df.assign(section="DupA"))
-                    if self._dup_b_df is not None: parts.append(self._dup_b_df.assign(section="DupB"))
+                    if self._dup_a_df is not None: parts.append(self._dup_a_df.assign(section="ไฟล์1"))
+                    if self._dup_b_df is not None: parts.append(self._dup_b_df.assign(section="ไฟล์2"))
                     pd.concat(parts, ignore_index=True).to_csv(path, index=False, encoding="utf-8")
                 else:
                     with pd.ExcelWriter(path) as xw:
-                        if self._dup_a_df is not None: self._dup_a_df.to_excel(xw, index=False, sheet_name="DupA")
-                        if self._dup_b_df is not None: self._dup_b_df.to_excel(xw, index=False, sheet_name="DupB")
-                self._update_progress(step_inc=1, note="saved file")
-                self._finish_progress("Export finished")
-            QtWidgets.QMessageBox.information(self, "Export", f"บันทึกแล้ว: {path}")
+                        if self._dup_a_df is not None: self._dup_a_df.to_excel(xw, index=False, sheet_name="ไฟล์1_ซ้ำ")
+                        if self._dup_b_df is not None: self._dup_b_df.to_excel(xw, index=False, sheet_name="ไฟล์2_ซ้ำ")
+                self._update_progress(step_inc=1, note="บันทึกไฟล์แล้ว")
+                self._finish_progress("ส่งออกเสร็จแล้ว ✅")
+            QtWidgets.QMessageBox.information(self, "ส่งออก", f"✅ บันทึกสำเร็จที่:\n{path}")
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Export error", str(e))
+            QtWidgets.QMessageBox.critical(self, "ข้อผิดพลาด", f"ไม่สามารถส่งออกได้: {e}")
 
     def _export_valdiff(self):
         if self._valdiff_df is None or len(self._valdiff_df) == 0:
-            QtWidgets.QMessageBox.information(self, "Export", "ไม่มี Value diff")
+            QtWidgets.QMessageBox.information(self, "ส่งออก", "ไม่มีค่าที่ไม่ตรงกัน")
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save value diff (Excel/CSV)", "value_diff.xlsx",
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "บันทึกค่าที่ไม่ตรงกัน", "value_diff.xlsx",
                                                         "Excel (*.xlsx);;CSV (*.csv)")
         if not path:
             return
         try:
-            with self._busy("Exporting value diff"):
-                self._start_progress("Exporting value diff", total_steps=2)
+            with self._busy("ส่งออกค่าที่ไม่ตรงกัน"):
+                self._start_progress("ส่งออกค่าไม่ตรง", total_steps=2)
                 if str(path).lower().endswith(".csv"):
                     self._valdiff_df.to_csv(path, index=False, encoding="utf-8")
                 else:
                     with pd.ExcelWriter(path) as xw:
-                        self._valdiff_df.to_excel(xw, index=False, sheet_name="ValueDiff")
-                self._update_progress(step_inc=1, note="saved file")
-                self._finish_progress("Export finished")
-            QtWidgets.QMessageBox.information(self, "Export", f"บันทึกแล้ว: {path}")
+                        self._valdiff_df.to_excel(xw, index=False, sheet_name="ค่าไม่ตรง")
+                self._update_progress(step_inc=1, note="บันทึกไฟล์แล้ว")
+                self._finish_progress("ส่งออกเสร็จแล้ว ✅")
+            QtWidgets.QMessageBox.information(self, "ส่งออก", f"✅ บันทึกสำเร็จที่:\n{path}\n\nจำนวนแถวที่ไม่ตรง: {len(self._valdiff_df):,}")
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Export error", str(e))
+            QtWidgets.QMessageBox.critical(self, "ข้อผิดพลาด", f"ไม่สามารถส่งออกได้: {e}")
 
 
 # =============================

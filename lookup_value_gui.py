@@ -163,11 +163,31 @@ class LookupApp(QtWidgets.QWidget):
         master_key = self.master_key_combo.currentText()
         master_value = self.master_value_combo.currentText()
         result_col = self.result_name.text().strip() or f"{master_value}_mapped"
-        # provide progress updates: prepare -> merge -> done
+        
+        # Check for duplicate keys (causes data explosion)
+        target_dup = self.target_df[target_key].duplicated().sum()
+        master_dup = self.master_df[master_key].duplicated().sum()
+        
+        join_type = "left"
+        if target_dup > 0 or master_dup > 0:
+            msg = f"⚠️ Duplicate keys detected:\n"
+            if target_dup > 0:
+                msg += f"  • Target: {target_dup} duplicates\n"
+            if master_dup > 0:
+                msg += f"  • Master: {master_dup} duplicates\n"
+            msg += f"\nUsing INNER join (safer) instead of LEFT join.\nContinue?"
+            reply = QMessageBox.warning(self, "Duplicate Keys", msg, QMessageBox.Ok | QMessageBox.Cancel)
+            if reply != QMessageBox.Ok:
+                return
+            join_type = "inner"
+        
+        # provide progress updates: chunk merge with memory-safe concat
         try:
-            self._start_progress("Lookup", total_steps=3)
+            chunk_size = 5000  # Reduced from 10000 for safety
+            num_chunks = (len(self.target_df) + chunk_size - 1) // chunk_size
+            self._start_progress("Lookup (streaming)", total_steps=num_chunks + 2)
 
-            # เพิ่ม suffix เพื่อบอกว่ามาจากไฟล์ไหน (step 1)
+            # Prepare data
             target_renamed = self.target_df.add_suffix("_target")
             master_subset = self.master_df[[master_key, master_value]].copy()
             master_subset = master_subset.rename(
@@ -178,31 +198,77 @@ class LookupApp(QtWidgets.QWidget):
             )
             self._update_progress(step_inc=1, note="prepared")
 
-            # merge โดยใช้ key target/master (step 2)
-            merged = pd.merge(
-                target_renamed,
-                master_subset,
-                how="left",
-                left_on=f"{target_key}_target",
-                right_on=f"{master_key}_master"
-            )
-            self._update_progress(step_inc=1, note="merged")
-
-            # เพิ่ม column เก็บค่า lookup (master_value) (step 3)
-            merged[result_col] = merged[f"{master_value}_master"]
-
-            self.merged_df = merged
-            self.show_table(merged)
-
-            self._update_progress(step_inc=1, note="displayed")
+            # Merge in chunks and store only preview (first 1000 rows for display)
+            preview_rows = []
+            total_rows = 0
+            
+            for chunk_idx in range(0, len(target_renamed), chunk_size):
+                chunk = target_renamed.iloc[chunk_idx:chunk_idx+chunk_size]
+                merged_chunk = pd.merge(
+                    chunk,
+                    master_subset,
+                    how=join_type,
+                    left_on=f"{target_key}_target",
+                    right_on=f"{master_key}_master"
+                )
+                
+                # Add result column
+                merged_chunk[result_col] = merged_chunk[f"{master_value}_master"]
+                
+                # Keep first 1000 rows for preview display
+                if len(preview_rows) < 1000:
+                    preview_rows.extend(merged_chunk.head(1000 - len(preview_rows)).values.tolist())
+                
+                total_rows += len(merged_chunk)
+                self._update_progress(step_inc=1, note=f"chunk {(chunk_idx // chunk_size) + 1}/{num_chunks}")
+                QtWidgets.QApplication.processEvents()
+            
+            # Create merged_df with just preview for display
+            if preview_rows and len(target_renamed.columns) > 0:
+                # Get column names from first chunk
+                chunk = target_renamed.iloc[0:chunk_size]
+                merged_chunk = pd.merge(
+                    chunk,
+                    master_subset,
+                    how=join_type,
+                    left_on=f"{target_key}_target",
+                    right_on=f"{master_key}_master"
+                )
+                merged_chunk[result_col] = merged_chunk[f"{master_value}_master"]
+                cols = merged_chunk.columns.tolist()
+                
+                self.merged_df = pd.DataFrame(preview_rows, columns=cols)
+            else:
+                self.merged_df = pd.DataFrame()
+            
+            self._update_progress(step_inc=1, note="prepared preview")
+            
+            # Show preview
+            self.show_table(self.merged_df.head(1000) if len(self.merged_df) > 1000 else self.merged_df)
+            
             self._finish_progress("Lookup เสร็จแล้ว")
 
             QMessageBox.information(
                 self,
                 "Done",
-                f"✅ Lookup complete! Now showing columns with '_target' and '_master' suffixes"
+                f"✅ Lookup complete!\n"
+                f"Total rows processed: {total_rows:,}\n"
+                f"Showing first {len(self.merged_df)} rows in preview\n"
+                f"(Full result will be saved on export)"
             )
 
+        except MemoryError as e:
+            try:
+                self._finish_progress("Lookup ล้มเหลว (ไม่มีหน่วยความจำ)")
+            except Exception:
+                pass
+            QMessageBox.critical(
+                self, 
+                "Memory Error", 
+                f"Out of memory even with streaming.\n\n"
+                f"Master file or key duplicates are too large.\n"
+                f"Try filtering Master file first.\n\n{str(e)}"
+            )
         except Exception as e:
             try:
                 self._finish_progress("Lookup ล้มเหลว")
@@ -220,18 +286,92 @@ class LookupApp(QtWidgets.QWidget):
                 self.table.setItem(i, j, QtWidgets.QTableWidgetItem(str(val)))
 
     def export_data(self):
-        if self.merged_df is None:
+        if self.target_df is None or self.master_df is None:
             QMessageBox.warning(self, "No Data", "Please run lookup first.")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export File", "", "Excel Files (*.xlsx)")
+        
+        path, _ = QFileDialog.getSaveFileName(self, "Export File", "", "Excel Files (*.xlsx);;CSV Files (*.csv)")
         if not path:
             return
+        
+        # Get current settings from UI
+        target_key = self.target_key_combo.currentText()
+        master_key = self.master_key_combo.currentText()
+        master_value = self.master_value_combo.currentText()
+        result_col = self.result_name.text().strip() or f"{master_value}_mapped"
+        
+        # Determine join type from last lookup
+        target_dup = self.target_df[target_key].duplicated().sum()
+        master_dup = self.master_df[master_key].duplicated().sum()
+        join_type = "inner" if (target_dup > 0 or master_dup > 0) else "left"
+        
         try:
-            self._start_progress("Exporting", total_steps=1)
-            self.merged_df.to_excel(path, index=False)
-            self._update_progress(step_inc=1, note="saved")
+            chunk_size = 5000
+            num_chunks = (len(self.target_df) + chunk_size - 1) // chunk_size
+            self._start_progress("Exporting (streaming)", total_steps=num_chunks + 1)
+            
+            target_renamed = self.target_df.add_suffix("_target")
+            master_subset = self.master_df[[master_key, master_value]].copy()
+            master_subset = master_subset.rename(
+                columns={
+                    master_key: f"{master_key}_master",
+                    master_value: f"{master_value}_master"
+                }
+            )
+            
+            is_first_chunk = True
+            is_xlsx = path.lower().endswith('.xlsx')
+            
+            if is_xlsx:
+                writer = pd.ExcelWriter(path, engine='openpyxl')
+            else:
+                writer = None
+            
+            try:
+                for chunk_idx in range(0, len(target_renamed), chunk_size):
+                    chunk = target_renamed.iloc[chunk_idx:chunk_idx+chunk_size]
+                    merged_chunk = pd.merge(
+                        chunk,
+                        master_subset,
+                        how=join_type,
+                        left_on=f"{target_key}_target",
+                        right_on=f"{master_key}_master"
+                    )
+                    
+                    # Add result column
+                    merged_chunk[result_col] = merged_chunk[f"{master_value}_master"]
+                    
+                    # Write to file
+                    if is_xlsx:
+                        merged_chunk.to_excel(
+                            writer,
+                            sheet_name='Result',
+                            index=False,
+                            startrow=0 if is_first_chunk else writer.sheets['Result'].max_row
+                        )
+                    else:
+                        # CSV mode: append
+                        if is_first_chunk:
+                            merged_chunk.to_csv(path, index=False, mode='w')
+                        else:
+                            merged_chunk.to_csv(path, index=False, mode='a', header=False)
+                    
+                    is_first_chunk = False
+                    self._update_progress(step_inc=1, note=f"chunk {(chunk_idx // chunk_size) + 1}/{num_chunks}")
+                    QtWidgets.QApplication.processEvents()
+            finally:
+                if is_xlsx and writer:
+                    writer.close()
+            
+            self._update_progress(step_inc=1, note="finalized")
             self._finish_progress("Export เสร็จแล้ว")
-            QMessageBox.information(self, "Exported", f"💾 Exported successfully to:\n{path}")
+            QMessageBox.information(
+                self,
+                "Exported",
+                f"💾 Exported successfully to:\n{path}\n\n"
+                f"Total rows: {len(self.target_df):,}\n"
+                f"Processed in {num_chunks} chunks"
+            )
         except Exception as e:
             try:
                 self._finish_progress("Export ล้มเหลว")
