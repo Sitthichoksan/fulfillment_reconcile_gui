@@ -4,7 +4,7 @@ from PyQt5 import QtWidgets
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 
 
-class LookupApp(QtWidgets.QWidget):
+class LookupApp(QtWidgets.QWidget): #comment
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Reconcile – Lookup Value (PyQt5)")
