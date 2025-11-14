@@ -1,9 +1,9 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Simple Transform Tool (PyQt5) – Trim / Delete / Pad / Group-Sum / Calculation
 Standalone widget that can be used as a plugin in Reconcile GUI.
-
 Features
 - Load CSV/TSV/TXT/XLS/XLSX with simple auto-delimiter & encoding
 - Preview: left = original, right = current output (single operation from original)
@@ -14,23 +14,18 @@ Features
 - Calculation: (column|constant) <op> (column|constant) → new column
 - Export: CSV / Excel from current output
 """
-
 from pathlib import Path
 from typing import Optional
-
 import pandas as pd
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-
 # ---------- small helpers ----------
-
 def _read_any(path: Path) -> pd.DataFrame:
     """Tiny reader with delimiter+encoding guess, always returns all columns as string."""
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(str(p))
     suf = p.suffix.lower()
-
     if suf in [".xlsx", ".xls"]:
         df = pd.read_excel(p, dtype=str)
     else:
@@ -61,35 +56,28 @@ def _read_any(path: Path) -> pd.DataFrame:
                 df = None  # type: ignore
         if df is None:
             raise last_err or RuntimeError("Cannot read file")
-
     # ensure string columns
     for c in df.columns:
         df[c] = df[c].astype(str)
     return df
-
 
 def _safe_numeric(s: pd.Series) -> pd.Series:
     s2 = s.astype(str).str.replace(",", "", regex=False)
     s2 = s2.str.replace("(", "-", regex=False).str.replace(")", "", regex=False)
     return pd.to_numeric(s2, errors="coerce")
 
-
 class _PandasModel(QtCore.QAbstractTableModel):
     def __init__(self, df: Optional[pd.DataFrame] = None, parent=None):
         super().__init__(parent)
         self._df = df if df is not None else pd.DataFrame()
-
     def set_df(self, df: Optional[pd.DataFrame]):
         self.beginResetModel()
         self._df = df if df is not None else pd.DataFrame()
         self.endResetModel()
-
     def rowCount(self, parent=QtCore.QModelIndex()):  # type: ignore[override]
         return 0 if self._df is None else len(self._df)
-
     def columnCount(self, parent=QtCore.QModelIndex()):  # type: ignore[override]
         return 0 if self._df is None else self._df.shape[1]
-
     def data(self, index, role=QtCore.Qt.DisplayRole):  # type: ignore[override]
         if not index.isValid() or self._df is None:
             return None
@@ -97,7 +85,6 @@ class _PandasModel(QtCore.QAbstractTableModel):
             val = self._df.iat[index.row(), index.column()]
             return "" if pd.isna(val) else str(val)
         return None
-
     def headerData(self, section, orientation, role=QtCore.Qt.DisplayRole):  # type: ignore[override]
         if self._df is None:
             return None
@@ -111,18 +98,14 @@ class _PandasModel(QtCore.QAbstractTableModel):
                 return section + 1
         return None
 
-
 # ---------- main widget ----------
-
 class SimpleTransformTool(QtWidgets.QWidget):
     WINDOW_TITLE = "Reconcile – Simple Transform Tool"
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self._path: Optional[Path] = None
         self.df_orig: pd.DataFrame = pd.DataFrame()
         self.df_out: pd.DataFrame = pd.DataFrame()
-
         # try theme helpers if available
         try:
             from theme import set_table_defaults  # type: ignore
@@ -139,127 +122,137 @@ class SimpleTransformTool(QtWidgets.QWidget):
                 hh.setStretchLastSection(True)
                 hh.setMinimumSectionSize(80)
             self._set_table_defaults = _fallback
-
         self._build_ui()
-
     # ----- UI -----
     def _build_ui(self):
         self.setWindowTitle(self.WINDOW_TITLE)
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
-
-        # top: file bar
-        fb = QtWidgets.QHBoxLayout()
+        root.setSpacing(10)
+        # -------------------------------
+        # TOP BAR
+        # -------------------------------
+        top = QtWidgets.QHBoxLayout()
         self.btn_load = QtWidgets.QPushButton("📂 Load file")
         self.btn_reset = QtWidgets.QPushButton("↺ Reset output")
-        self.btn_export_csv = QtWidgets.QPushButton("💾 Export CSV")
-        self.btn_export_xlsx = QtWidgets.QPushButton("💾 Export Excel")
         self.lbl_file = QtWidgets.QLabel("No file loaded")
         self.lbl_rows = QtWidgets.QLabel("Rows: 0")
         self.cmb_preview = QtWidgets.QComboBox()
         self.cmb_preview.addItems(["1,000", "5,000", "20,000", "All"])
         self.cmb_preview.setCurrentIndex(1)
-
-        for w in (self.lbl_file, self.lbl_rows):
-            w.setStyleSheet("color:#6b7280;")
-
-        fb.addWidget(self.btn_load)
-        fb.addWidget(self.btn_reset)
-        fb.addStretch(1)
-        fb.addWidget(QtWidgets.QLabel("Preview limit:"))
-        fb.addWidget(self.cmb_preview)
-        fb.addSpacing(8)
-        fb.addWidget(self.lbl_file)
-        fb.addSpacing(8)
-        fb.addWidget(self.lbl_rows)
-        fb.addSpacing(8)
-        fb.addWidget(self.btn_export_csv)
-        fb.addWidget(self.btn_export_xlsx)
-        root.addLayout(fb)
-
-        # center: splitter – left tools, right preview (orig/out)
-        splitter = QtWidgets.QSplitter()
-        splitter.setOrientation(QtCore.Qt.Horizontal)
-
-        # left tools tabs
+        self.btn_export_csv = QtWidgets.QPushButton("💾 Export CSV")
+        self.btn_export_xlsx = QtWidgets.QPushButton("💾 Export Excel")
+        for lab in (self.lbl_file, self.lbl_rows):
+            lab.setStyleSheet("color:#6b7280; font-size:12px;")
+        top.addWidget(self.btn_load)
+        top.addWidget(self.btn_reset)
+        top.addStretch()
+        top.addWidget(QtWidgets.QLabel("Preview limit:"))
+        top.addWidget(self.cmb_preview)
+        top.addSpacing(8)
+        top.addWidget(self.lbl_file)
+        top.addSpacing(8)
+        top.addWidget(self.lbl_rows)
+        top.addSpacing(8)
+        top.addWidget(self.btn_export_csv)
+        top.addWidget(self.btn_export_xlsx)
+        root.addLayout(top)
+        # ------------------------------------------------------
+        # MAIN SPLITTER (TOP = calculation panel, BOTTOM = tables)
+        # ------------------------------------------------------
+        main_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        # ------------------------------------------------------
+        # TOP PART — CALCULATION PANEL ONLY
+        # ------------------------------------------------------
+        calc_panel = QtWidgets.QWidget()
+        calc_layout = QtWidgets.QVBoxLayout(calc_panel)
+        calc_layout.setContentsMargins(12, 12, 12, 12)
+        calc_layout.setSpacing(10)
+        # Tabs (Trim / Delete / Pad / Group / Calc)
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.setMinimumWidth(380)
+        self.tabs.setTabPosition(QtWidgets.QTabWidget.North)
+        self.tabs.setMinimumHeight(230)
         self._init_tab_trim()
         self._init_tab_delete()
         self._init_tab_pad()
-        self._init_tab_group()   # dropdown version
+        self._init_tab_group()
         self._init_tab_calc()
-        splitter.addWidget(self.tabs)
-
-        # right preview
-        right = QtWidgets.QWidget()
-        rv = QtWidgets.QVBoxLayout(right)
-        rv.setContentsMargins(8, 0, 0, 0)
-        rv.setSpacing(4)
-
-        lab1 = QtWidgets.QLabel("Input preview (original file)")
-        lab2 = QtWidgets.QLabel("Output preview (after operation)")
-        for lb in (lab1, lab2):
-            lb.setStyleSheet("font-weight:600; color:#374151;")
-
+        calc_layout.addWidget(self.tabs)
+        main_splitter.addWidget(calc_panel)
+        # ------------------------------------------------------
+        # BOTTOM PART — 2 PREVIEW TABLES SIDE BY SIDE
+        # ------------------------------------------------------
+        preview_widget = QtWidgets.QWidget()
+        pv = QtWidgets.QHBoxLayout(preview_widget)
+        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setSpacing(8)
+        # LEFT: Input Preview
+        left_box = QtWidgets.QVBoxLayout()
+        lab_in = QtWidgets.QLabel("Input preview (Original file)")
+        lab_in.setStyleSheet("font-weight:600; color:#374151;")
         self.table_orig = QtWidgets.QTableView()
-        self.table_out = QtWidgets.QTableView()
         self.model_orig = _PandasModel()
-        self.model_out = _PandasModel()
         self.table_orig.setModel(self.model_orig)
-        self.table_out.setModel(self.model_out)
         self._set_table_defaults(self.table_orig)
+        left_box.addWidget(lab_in)
+        left_box.addWidget(self.table_orig)
+        # RIGHT: Output Preview
+        right_box = QtWidgets.QVBoxLayout()
+        lab_out = QtWidgets.QLabel("Output preview (After operation)")
+        lab_out.setStyleSheet("font-weight:600; color:#374151;")
+        self.table_out = QtWidgets.QTableView()
+        self.model_out = _PandasModel()
+        self.table_out.setModel(self.model_out)
         self._set_table_defaults(self.table_out)
-
-        rv.addWidget(lab1)
-        rv.addWidget(self.table_orig, 1)
-        rv.addWidget(lab2)
-        rv.addWidget(self.table_out, 1)
-
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 7)
-
-        root.addWidget(splitter)
-
-        # status
+        right_box.addWidget(lab_out)
+        right_box.addWidget(self.table_out)
+        pv.addLayout(left_box, 1)
+        pv.addLayout(right_box, 1)
+        main_splitter.addWidget(preview_widget)
+        main_splitter.setStretchFactor(0, 3)
+        main_splitter.setStretchFactor(1, 7)
+        root.addWidget(main_splitter)
+        # STATUS BAR
         self.status = QtWidgets.QStatusBar()
         self.status.showMessage("Ready")
         root.addWidget(self.status)
-
+        # SIGNALS
+        self.btn_load.clicked.connect(self._on_load)
+        self.btn_reset.clicked.connect(self._on_reset)
+        self.btn_export_csv.clicked.connect(lambda: self._export("csv"))
+        self.btn_export_xlsx.clicked.connect(lambda: self._export("xlsx"))
+        self.cmb_preview.currentIndexChanged.connect(lambda *_: self._refresh_tables())
         # wire signals
         self.btn_load.clicked.connect(self._on_load)
         self.btn_reset.clicked.connect(self._on_reset)
         self.btn_export_csv.clicked.connect(lambda: self._export("csv"))
         self.btn_export_xlsx.clicked.connect(lambda: self._export("xlsx"))
         self.cmb_preview.currentIndexChanged.connect(lambda *_: self._refresh_tables())
-
     # ----- helpers -----
     def _preview_limit(self) -> Optional[int]:
         txt = self.cmb_preview.currentText()
         if "All" in txt:
             return None
         return int(txt.replace(",", ""))
-
     def _preview_df(self, df: Optional[pd.DataFrame]) -> pd.DataFrame:
         if df is None:
             return pd.DataFrame()
         limit = self._preview_limit()
         if limit is None:
-            return df.copy()
-        return df.head(limit).copy()
-
+            out = df.copy()
+        else:
+            out = df.head(limit).copy()
+        # ----- เพิ่มคอลัมน์ Row Number -----
+        out.insert(0, "Row", range(1, len(out) + 1))
+        return out
     def _refresh_tables(self):
         self.model_orig.set_df(self._preview_df(self.df_orig))
         self.model_out.set_df(self._preview_df(self.df_out))
         self.lbl_rows.setText(f"Rows: {len(self.df_orig) if self.df_orig is not None else 0}")
         self.table_orig.resizeColumnsToContents()
         self.table_out.resizeColumnsToContents()
-
     def _set_status(self, msg: str):
         self.status.showMessage(msg)
-
     def _busy(self, msg: str):
         """Context manager for busy cursor + status."""
         class _Ctx:
@@ -276,14 +269,12 @@ class SimpleTransformTool(QtWidgets.QWidget):
                 else:
                     self.outer._set_status(str(exc))
         return _Ctx(self, msg)
-
     # ----- tabs -----
     def _init_tab_trim(self):
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(8)
-
         # filter row
         f1 = QtWidgets.QHBoxLayout()
         f1.addWidget(QtWidgets.QLabel("Column"))
@@ -296,7 +287,6 @@ class SimpleTransformTool(QtWidgets.QWidget):
         self.trim_filter_val.setPlaceholderText("ค่าที่ต้องการ filter (ถ้าเลือก '(ทุกแถว)' จะไม่ใช้ filter)")
         f1.addWidget(self.trim_filter_val, 2)
         lay.addLayout(f1)
-
         # trim options
         f2 = QtWidgets.QHBoxLayout()
         self.trim_mode = QtWidgets.QComboBox()
@@ -321,7 +311,6 @@ class SimpleTransformTool(QtWidgets.QWidget):
         self.btn_trim_apply = QtWidgets.QPushButton("Apply")
         f2.addWidget(self.btn_trim_apply)
         lay.addLayout(f2)
-
         note = QtWidgets.QLabel(
             "ตัวอย่าง: เลือก Column = SUPPLIER, Filter = contains 'CS1', Trim mode = keep last 4 chars\n"
             "ระบบจะ trim เฉพาะแถวที่ SUPPLIER มี 'CS1' เท่านั้น (ใช้ข้อมูลจาก original file)"
@@ -330,16 +319,13 @@ class SimpleTransformTool(QtWidgets.QWidget):
         note.setWordWrap(True)
         lay.addWidget(note)
         lay.addStretch(1)
-
         self.btn_trim_apply.clicked.connect(self._do_trim)
         self.tabs.addTab(w, "Trim")
-
     def _init_tab_delete(self):
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(8)
-
         r1 = QtWidgets.QHBoxLayout()
         r1.addWidget(QtWidgets.QLabel("Column"))
         self.del_col = QtWidgets.QComboBox()
@@ -353,23 +339,19 @@ class SimpleTransformTool(QtWidgets.QWidget):
         self.btn_delete_apply = QtWidgets.QPushButton("Delete rows")
         r1.addWidget(self.btn_delete_apply)
         lay.addLayout(r1)
-
         note = QtWidgets.QLabel(
             "หมายเหตุ: การลบคือการลบทั้งแถวจาก original file (ผลลัพธ์ไปแสดงใน Output preview)"
         )
         note.setStyleSheet("color:#6b7280;")
         lay.addWidget(note)
         lay.addStretch(1)
-
         self.btn_delete_apply.clicked.connect(self._do_delete)
         self.tabs.addTab(w, "Delete")
-
     def _init_tab_pad(self):
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(8)
-
         r1 = QtWidgets.QHBoxLayout()
         r1.addWidget(QtWidgets.QLabel("Column"))
         self.pad_col = QtWidgets.QComboBox()
@@ -390,26 +372,21 @@ class SimpleTransformTool(QtWidgets.QWidget):
         self.btn_pad_apply = QtWidgets.QPushButton("Apply")
         r1.addWidget(self.btn_pad_apply)
         lay.addLayout(r1)
-
         self.chk_pad_only_shorter = QtWidgets.QCheckBox("ทำเฉพาะค่าที่สั้นกว่าความยาวที่กำหนด (ไม่ตัดค่าที่ยาวเกิน)")
         self.chk_pad_only_shorter.setChecked(True)
         lay.addWidget(self.chk_pad_only_shorter)
-
         note = QtWidgets.QLabel("ตัวอย่าง: Column=STORE, Length=8, Char='0', Side=Left → 6417 → 00006417")
         note.setStyleSheet("color:#6b7280;")
         lay.addWidget(note)
         lay.addStretch(1)
-
         self.btn_pad_apply.clicked.connect(self._do_pad)
         self.tabs.addTab(w, "Pad")
-
     def _init_tab_group(self):
         """Group/Sum tab – dropdown version with mode toggle."""
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(8)
-
         # mode
         mode_box = QtWidgets.QGroupBox("Mode")
         ml = QtWidgets.QHBoxLayout(mode_box)
@@ -421,23 +398,19 @@ class SimpleTransformTool(QtWidgets.QWidget):
         ml.addWidget(self.radio_sum_only)
         ml.addWidget(self.radio_group_sum)
         lay.addWidget(mode_box)
-
         # dropdowns (single select)
         form = QtWidgets.QFormLayout()
         form.setLabelAlignment(QtCore.Qt.AlignRight)
-
         self.ddl_group_by = QtWidgets.QComboBox()
         self.ddl_sum_col = QtWidgets.QComboBox()
         form.addRow("Group by column:", self.ddl_group_by)
         form.addRow("Sum column:", self.ddl_sum_col)
         lay.addLayout(form)
-
         bottom = QtWidgets.QHBoxLayout()
         self.btn_group_apply = QtWidgets.QPushButton("Run Group / Sum")
         bottom.addStretch(1)
         bottom.addWidget(self.btn_group_apply)
         lay.addLayout(bottom)
-
         note = QtWidgets.QLabel(
             "กติกา:\n"
             "• Group only → ใช้ Group by column จาก original แล้วคืน count ต่อกลุ่ม\n"
@@ -448,7 +421,6 @@ class SimpleTransformTool(QtWidgets.QWidget):
         note.setWordWrap(True)
         lay.addWidget(note)
         lay.addStretch(1)
-
         # dynamic visibility
         def update_group_sum_visibility():
             if self.radio_group_only.isChecked():
@@ -469,21 +441,17 @@ class SimpleTransformTool(QtWidgets.QWidget):
                 form.labelForField(self.ddl_group_by).setVisible(True)
                 self.ddl_sum_col.setVisible(True)
                 form.labelForField(self.ddl_sum_col).setVisible(True)
-
         self.radio_group_only.toggled.connect(update_group_sum_visibility)
         self.radio_sum_only.toggled.connect(update_group_sum_visibility)
         self.radio_group_sum.toggled.connect(update_group_sum_visibility)
         update_group_sum_visibility()
-
         self.btn_group_apply.clicked.connect(self._do_group_sum)
         self.tabs.addTab(w, "Group / Sum")
-
     def _init_tab_calc(self):
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(8)
-
         # row: left operand
         r1 = QtWidgets.QHBoxLayout()
         r1.addWidget(QtWidgets.QLabel("Left"))
@@ -497,7 +465,6 @@ class SimpleTransformTool(QtWidgets.QWidget):
         r1.addWidget(self.cal_left_mode_const)
         r1.addWidget(self.cal_left_const, 1)
         lay.addLayout(r1)
-
         # row: operator & right operand
         r2 = QtWidgets.QHBoxLayout()
         r2.addWidget(QtWidgets.QLabel("Operator"))
@@ -516,7 +483,6 @@ class SimpleTransformTool(QtWidgets.QWidget):
         r2.addWidget(self.cal_right_mode_const)
         r2.addWidget(self.cal_right_const, 1)
         lay.addLayout(r2)
-
         # row: result name + button
         r3 = QtWidgets.QHBoxLayout()
         r3.addWidget(QtWidgets.QLabel("Result column name"))
@@ -525,7 +491,6 @@ class SimpleTransformTool(QtWidgets.QWidget):
         self.btn_cal_apply = QtWidgets.QPushButton("Compute")
         r3.addWidget(self.btn_cal_apply)
         lay.addLayout(r3)
-
         note = QtWidgets.QLabel(
             "ตัวอย่าง: Left=Column QTY, Operator=*, Right=Constant 7 → result = QTY*7\n"
             "ใช้ข้อมูลจาก original file ทุกครั้ง (ไม่ chain จาก Output เดิม)"
@@ -534,21 +499,17 @@ class SimpleTransformTool(QtWidgets.QWidget):
         note.setWordWrap(True)
         lay.addWidget(note)
         lay.addStretch(1)
-
         # mode toggles
         self.cal_left_mode_col.toggled.connect(self._update_calc_enabled)
         self.cal_right_mode_col.toggled.connect(self._update_calc_enabled)
         self._update_calc_enabled()
-
         self.btn_cal_apply.clicked.connect(self._do_calc)
         self.tabs.addTab(w, "Calculation")
-
     def _update_calc_enabled(self):
         self.cal_left_col.setEnabled(self.cal_left_mode_col.isChecked())
         self.cal_left_const.setEnabled(self.cal_left_mode_const.isChecked())
         self.cal_right_col.setEnabled(self.cal_right_mode_col.isChecked())
         self.cal_right_const.setEnabled(self.cal_right_mode_const.isChecked())
-
     # ----- top actions -----
     def _on_load(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -567,7 +528,6 @@ class SimpleTransformTool(QtWidgets.QWidget):
                 self._refresh_tables()
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Load error", str(e))
-
     def _on_reset(self):
         if self.df_orig is None or self.df_orig.empty:
             return
@@ -575,7 +535,6 @@ class SimpleTransformTool(QtWidgets.QWidget):
             self.df_out = self.df_orig.copy()
             self._refresh_column_widgets()
             self._refresh_tables()
-
     def _export(self, kind: str):
         if self.df_out is None or self.df_out.empty:
             QtWidgets.QMessageBox.information(self, "Export", "ยังไม่มีข้อมูล Output")
@@ -598,14 +557,12 @@ class SimpleTransformTool(QtWidgets.QWidget):
                     self.df_out.to_excel(path, index=False)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Export error", str(e))
-
     def _refresh_column_widgets(self):
         """
         Refresh combobox/dropdown columns.
         ใช้ column จาก original file (df_orig) เสมอ ตาม Option 2
         """
         cols = list(self.df_orig.columns) if isinstance(self.df_orig, pd.DataFrame) else []
-
         # combobox ทั่วไป
         for cb in [
             getattr(self, "trim_col", None),
@@ -621,22 +578,18 @@ class SimpleTransformTool(QtWidgets.QWidget):
             cb.addItems(cols)
             if prev in cols:
                 cb.setCurrentText(prev)
-
         # dropdown group / sum
         if hasattr(self, "ddl_group_by") and hasattr(self, "ddl_sum_col"):
             prev_group = self.ddl_group_by.currentText()
             prev_sum = self.ddl_sum_col.currentText()
-
             self.ddl_group_by.clear()
             self.ddl_sum_col.clear()
             self.ddl_group_by.addItems(cols)
             self.ddl_sum_col.addItems(cols)
-
             if prev_group in cols:
                 self.ddl_group_by.setCurrentText(prev_group)
             if prev_sum in cols:
                 self.ddl_sum_col.setCurrentText(prev_sum)
-
     # ----- operations -----
     def _filter_mask(self, series: pd.Series, op: str, val: str) -> pd.Series:
         s = series.astype(str)
@@ -653,7 +606,6 @@ class SimpleTransformTool(QtWidgets.QWidget):
         if op == "ends with":
             return s.str.endswith(val, na=False)
         return s == val
-
     def _do_trim(self):
         if self.df_orig is None or self.df_orig.empty:
             return
@@ -663,7 +615,6 @@ class SimpleTransformTool(QtWidgets.QWidget):
         with self._busy(f"Trimming '{col}'"):
             df = self.df_orig.copy()
             s = df[col].astype(str)
-
             # filter
             op = self.trim_filter_op.currentText()
             val = self.trim_filter_val.text().strip()
@@ -671,11 +622,9 @@ class SimpleTransformTool(QtWidgets.QWidget):
                 mask = pd.Series([True] * len(df), index=df.index)
             else:
                 mask = self._filter_mask(s, op, val)
-
             mode = self.trim_mode.currentText()
             n = int(self.trim_arg.value())
             substr = self.trim_substr.text()
-
             s_new = s.copy()
             if mode == "strip spaces (ซ้าย+ขวา)":
                 s_new[mask] = s_new[mask].str.strip()
@@ -690,12 +639,10 @@ class SimpleTransformTool(QtWidgets.QWidget):
                 s_new[mask] = s_new[mask].str.slice(0, n)
             elif mode == "keep last N chars":
                 s_new[mask] = s_new[mask].str.slice(-n if n > 0 else None)
-
             df[col] = s_new
             self.df_out = df
             self._refresh_tables()
             self._refresh_column_widgets()
-
     def _do_delete(self):
         if self.df_orig is None or self.df_orig.empty:
             return
@@ -715,7 +662,6 @@ class SimpleTransformTool(QtWidgets.QWidget):
             self.df_out = df
             self._refresh_tables()
         QtWidgets.QMessageBox.information(self, "Delete", f"ลบ {removed} แถวเรียบร้อยแล้ว")
-
     def _do_pad(self):
         if self.df_orig is None or self.df_orig.empty:
             return
@@ -747,11 +693,9 @@ class SimpleTransformTool(QtWidgets.QWidget):
             self.df_out = df
             self._refresh_tables()
             self._refresh_column_widgets()
-
     def _do_group_sum(self):
         if self.df_orig is None or self.df_orig.empty:
             return
-
         # Determine mode
         if self.radio_group_only.isChecked():
             mode = "group"
@@ -759,11 +703,9 @@ class SimpleTransformTool(QtWidgets.QWidget):
             mode = "sum"
         else:
             mode = "group+sum"
-
         # Read selected columns from dropdowns
         grp_col = self.ddl_group_by.currentText().strip()
         sum_col = self.ddl_sum_col.currentText().strip()
-
         with self._busy("Running Group / Sum"):
             df = self.df_orig.copy()
             if mode == "group":
@@ -771,14 +713,12 @@ class SimpleTransformTool(QtWidgets.QWidget):
                     QtWidgets.QMessageBox.information(self, "Group", "โปรดเลือก Group by column")
                     return
                 out = df.groupby([grp_col], dropna=False).size().reset_index(name="count")
-
             elif mode == "sum":
                 if not sum_col or sum_col not in df.columns:
                     QtWidgets.QMessageBox.information(self, "Sum", "โปรดเลือก Sum column")
                     return
                 out_val = _safe_numeric(df[sum_col]).sum()
                 out = pd.DataFrame([{sum_col: out_val}])
-
             else:  # group+sum
                 if not grp_col or grp_col not in df.columns:
                     QtWidgets.QMessageBox.information(self, "Group + Sum", "โปรดเลือก Group by column")
@@ -789,16 +729,13 @@ class SimpleTransformTool(QtWidgets.QWidget):
                 df2 = df.copy()
                 df2[sum_col] = _safe_numeric(df2[sum_col])
                 out = df2.groupby([grp_col], dropna=False)[sum_col].sum().reset_index()
-
             self.df_out = out
             self._refresh_tables()
             self._refresh_column_widgets()
-
     def _do_calc(self):
         if self.df_orig is None or self.df_orig.empty:
             return
         outname = self.cal_result_name.text().strip() or "result"
-
         def _get_operand(is_col: bool, col_cb: QtWidgets.QComboBox, const_edit: QtWidgets.QLineEdit) -> pd.Series:
             if is_col:
                 col = col_cb.currentText()
@@ -815,13 +752,11 @@ class SimpleTransformTool(QtWidgets.QWidget):
                     except Exception:
                         raise ValueError(f"ค่า constant ไม่ใช่ตัวเลข: {txt}")
                 return pd.Series([val] * len(self.df_orig), index=self.df_orig.index)
-
         try:
             with self._busy("Computing"):
                 s_left = _get_operand(self.cal_left_mode_col.isChecked(), self.cal_left_col, self.cal_left_const)
                 s_right = _get_operand(self.cal_right_mode_col.isChecked(), self.cal_right_col, self.cal_right_const)
                 op = self.cal_op.currentText()
-
                 if op == "+":
                     res = s_left + s_right
                 elif op == "-":
@@ -839,12 +774,10 @@ class SimpleTransformTool(QtWidgets.QWidget):
                     res = s_left % s_right2
                 else:
                     res = pd.Series([pd.NA] * len(s_left), index=s_left.index)
-
                 # clean inf/NaN -> empty string for display
                 res = pd.to_numeric(res, errors="coerce")
                 res = res.replace([pd.NA, float("inf"), float("-inf")], pd.NA)
                 out_col = res.astype(object).where(~pd.isna(res), "")
-
                 df = self.df_orig.copy()
                 df[outname] = out_col
                 self.df_out = df
@@ -855,10 +788,8 @@ class SimpleTransformTool(QtWidgets.QWidget):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Calculation error", str(e))
 
-
 # entrypoint for standalone run
 EXPORTED_WIDGET = SimpleTransformTool
-
 if __name__ == "__main__":
     import sys
     app = QtWidgets.QApplication(sys.argv)
