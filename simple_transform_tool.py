@@ -228,12 +228,7 @@ class SimpleTransformTool(QtWidgets.QWidget):
         self.btn_export_csv.clicked.connect(lambda: self._export("csv"))
         self.btn_export_xlsx.clicked.connect(lambda: self._export("xlsx"))
         self.cmb_preview.currentIndexChanged.connect(lambda *_: self._refresh_tables())
-        # wire signals
-        self.btn_load.clicked.connect(self._on_load)
-        self.btn_reset.clicked.connect(self._on_reset)
-        self.btn_export_csv.clicked.connect(lambda: self._export("csv"))
-        self.btn_export_xlsx.clicked.connect(lambda: self._export("xlsx"))
-        self.cmb_preview.currentIndexChanged.connect(lambda *_: self._refresh_tables())
+       
     # ----- helpers -----
     def _preview_limit(self) -> Optional[int]:
         txt = self.cmb_preview.currentText()
@@ -562,25 +557,36 @@ class SimpleTransformTool(QtWidgets.QWidget):
         self.cal_right_col.setEnabled(self.cal_right_mode_col.isChecked())
         self.cal_right_const.setEnabled(self.cal_right_mode_const.isChecked())
     # ----- top actions -----
+        # ----- top actions -----
     def _on_load(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "เลือกไฟล์ข้อมูล", "", "Data files (*.csv *.tsv *.txt *.xlsx *.xls);;All files (*.*)"
+        # ใช้ QFileDialog แบบ object แล้วปิดเองหลังเลือกไฟล์
+        dlg = QtWidgets.QFileDialog(self)
+        dlg.setWindowTitle("เลือกไฟล์ข้อมูล")
+        dlg.setNameFilter("Data files (*.csv *.tsv *.txt *.xlsx *.xls);;All files (*.*)")
+        dlg.setFileMode(QtWidgets.QFileDialog.ExistingFile)
+
+        # บังคับให้เป็น dialog ของ Qt และปิดทันทีหลังเลือก
+        dlg.setOptions(
+            QtWidgets.QFileDialog.DontUseNativeDialog
+            | QtWidgets.QFileDialog.ReadOnly
         )
-        if not path:
+
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
+
+        path = dlg.selectedFiles()[0]
+        dlg.close()   # ✅ ปิดหน้าต่างเลือกไฟล์ทันที
+
         try:
-            self._start_progress("โหลดไฟล์ข้อมูล", total_steps=1)
-            df = _read_any(Path(path))
-            self._path = Path(path)
-            self.df_orig = df
-            self.df_out = df.copy()
-            self.lbl_file.setText(self._path.name)
-            self._update_progress(step_inc=1, note="แยกวิเคราะห์เสร็จ")
-            self._refresh_column_widgets()
-            self._refresh_tables()
-            self._finish_progress("โหลดไฟล์สำเร็จ ✅")
+            with self._busy("Loading file"):
+                df = _read_any(Path(path))
+                self._path = Path(path)
+                self.df_orig = df
+                self.df_out = df.copy()
+                self.lbl_file.setText(self._path.name)
+                self._refresh_column_widgets()
+                self._refresh_tables()
         except Exception as e:
-            self._finish_progress("โหลดล้มเหลว ❌")
             QtWidgets.QMessageBox.critical(self, "Load error", str(e))
     def _on_reset(self):
         if self.df_orig is None or self.df_orig.empty:
