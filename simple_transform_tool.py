@@ -16,6 +16,7 @@ Features
 """
 from pathlib import Path
 from typing import Optional
+import time
 import pandas as pd
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -106,6 +107,11 @@ class SimpleTransformTool(QtWidgets.QWidget):
         self._path: Optional[Path] = None
         self.df_orig: pd.DataFrame = pd.DataFrame()
         self.df_out: pd.DataFrame = pd.DataFrame()
+        # progress tracking
+        self._prog_task: Optional[str] = None
+        self._prog_total: int = 0
+        self._prog_step: int = 0
+        self._prog_t0: float = 0.0
         # try theme helpers if available
         try:
             from theme import set_table_defaults  # type: ignore
@@ -229,6 +235,51 @@ class SimpleTransformTool(QtWidgets.QWidget):
         self.btn_export_xlsx.clicked.connect(lambda: self._export("xlsx"))
         self.cmb_preview.currentIndexChanged.connect(lambda *_: self._refresh_tables())
     # ----- helpers -----
+    def _preview_limit(self) -> Optional[int]:
+        txt = self.cmb_preview.currentText()
+        if "All" in txt:
+            return None
+        return int(txt.replace(",", ""))
+    
+    def _start_progress(self, task: str, total_steps: int = 100):
+        """Start progress tracking with Thai messages"""
+        try:
+            self._prog_task = task
+            self._prog_total = max(1, int(total_steps))
+            self._prog_step = 0
+            self._prog_t0 = time.time()
+            self._set_status(f"กำลังทำงาน: {task} 0%")
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _update_progress(self, step_inc: int = 1, note: str = ""):
+        """Update progress and show percentage"""
+        try:
+            if not self._prog_task:
+                return
+            self._prog_step = min(self._prog_total, self._prog_step + int(step_inc))
+            pct = (self._prog_step / self._prog_total) * 100
+            note_text = f" • {note}" if note else ""
+            self._set_status(f"กำลังทำงาน: {self._prog_task} {pct:.0f}%{note_text}")
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _finish_progress(self, done_text: str = "เสร็จแล้ว"):
+        """Finish progress and show elapsed time"""
+        try:
+            dt = time.time() - (self._prog_t0 or time.time())
+            self._set_status(f"{done_text} ({dt:.2f}s)")
+            QtWidgets.QApplication.processEvents()
+            # reset
+            self._prog_task = None
+            self._prog_total = 0
+            self._prog_step = 0
+            self._prog_t0 = 0.0
+        except Exception:
+            pass
+
     def _preview_limit(self) -> Optional[int]:
         txt = self.cmb_preview.currentText()
         if "All" in txt:
@@ -518,23 +569,28 @@ class SimpleTransformTool(QtWidgets.QWidget):
         if not path:
             return
         try:
-            with self._busy("Loading file"):
-                df = _read_any(Path(path))
-                self._path = Path(path)
-                self.df_orig = df
-                self.df_out = df.copy()
-                self.lbl_file.setText(self._path.name)
-                self._refresh_column_widgets()
-                self._refresh_tables()
+            self._start_progress("โหลดไฟล์ข้อมูล", total_steps=1)
+            df = _read_any(Path(path))
+            self._path = Path(path)
+            self.df_orig = df
+            self.df_out = df.copy()
+            self.lbl_file.setText(self._path.name)
+            self._update_progress(step_inc=1, note="แยกวิเคราะห์เสร็จ")
+            self._refresh_column_widgets()
+            self._refresh_tables()
+            self._finish_progress("โหลดไฟล์สำเร็จ ✅")
         except Exception as e:
+            self._finish_progress("โหลดล้มเหลว ❌")
             QtWidgets.QMessageBox.critical(self, "Load error", str(e))
     def _on_reset(self):
         if self.df_orig is None or self.df_orig.empty:
             return
-        with self._busy("Resetting output"):
-            self.df_out = self.df_orig.copy()
-            self._refresh_column_widgets()
-            self._refresh_tables()
+        self._start_progress("รีเซตข้อมูล Output", total_steps=1)
+        self.df_out = self.df_orig.copy()
+        self._update_progress(step_inc=1, note="คัดลอกแล้ว")
+        self._refresh_column_widgets()
+        self._refresh_tables()
+        self._finish_progress("รีเซตสำเร็จ ✅")
     def _export(self, kind: str):
         if self.df_out is None or self.df_out.empty:
             QtWidgets.QMessageBox.information(self, "Export", "ยังไม่มีข้อมูล Output")
@@ -550,12 +606,16 @@ class SimpleTransformTool(QtWidgets.QWidget):
         if not path:
             return
         try:
-            with self._busy("Exporting"):
-                if kind == "csv":
-                    self.df_out.to_csv(path, index=False, encoding="utf-8-sig")
-                else:
-                    self.df_out.to_excel(path, index=False)
+            self._start_progress("ส่งออกข้อมูล", total_steps=1)
+            if kind == "csv":
+                self.df_out.to_csv(path, index=False, encoding="utf-8-sig")
+            else:
+                self.df_out.to_excel(path, index=False)
+            self._update_progress(step_inc=1, note="บันทึกแล้ว")
+            self._finish_progress("ส่งออกสำเร็จ ✅")
+            QtWidgets.QMessageBox.information(self, "Export", f"✅ บันทึกสำเร็จที่:\n{path}")
         except Exception as e:
+            self._finish_progress("ส่งออกล้มเหลว ❌")
             QtWidgets.QMessageBox.critical(self, "Export error", str(e))
     def _refresh_column_widgets(self):
         """
@@ -612,37 +672,39 @@ class SimpleTransformTool(QtWidgets.QWidget):
         col = self.trim_col.currentText()
         if not col or col not in self.df_orig.columns:
             return
-        with self._busy(f"Trimming '{col}'"):
-            df = self.df_orig.copy()
-            s = df[col].astype(str)
-            # filter
-            op = self.trim_filter_op.currentText()
-            val = self.trim_filter_val.text().strip()
-            if op == "(ทุกแถว)" or not val:
-                mask = pd.Series([True] * len(df), index=df.index)
-            else:
-                mask = self._filter_mask(s, op, val)
-            mode = self.trim_mode.currentText()
-            n = int(self.trim_arg.value())
-            substr = self.trim_substr.text()
-            s_new = s.copy()
-            if mode == "strip spaces (ซ้าย+ขวา)":
-                s_new[mask] = s_new[mask].str.strip()
-            elif mode == "lstrip spaces (ซ้าย)":
-                s_new[mask] = s_new[mask].str.lstrip()
-            elif mode == "rstrip spaces (ขวา)":
-                s_new[mask] = s_new[mask].str.rstrip()
-            elif mode == "remove substring":
-                if substr:
-                    s_new[mask] = s_new[mask].str.replace(substr, "", regex=False)
-            elif mode == "keep first N chars":
-                s_new[mask] = s_new[mask].str.slice(0, n)
-            elif mode == "keep last N chars":
-                s_new[mask] = s_new[mask].str.slice(-n if n > 0 else None)
-            df[col] = s_new
-            self.df_out = df
-            self._refresh_tables()
-            self._refresh_column_widgets()
+        self._start_progress(f"ตัดค่าใน '{col}'", total_steps=1)
+        df = self.df_orig.copy()
+        s = df[col].astype(str)
+        # filter
+        op = self.trim_filter_op.currentText()
+        val = self.trim_filter_val.text().strip()
+        if op == "(ทุกแถว)" or not val:
+            mask = pd.Series([True] * len(df), index=df.index)
+        else:
+            mask = self._filter_mask(s, op, val)
+        mode = self.trim_mode.currentText()
+        n = int(self.trim_arg.value())
+        substr = self.trim_substr.text()
+        s_new = s.copy()
+        if mode == "strip spaces (ซ้าย+ขวา)":
+            s_new[mask] = s_new[mask].str.strip()
+        elif mode == "lstrip spaces (ซ้าย)":
+            s_new[mask] = s_new[mask].str.lstrip()
+        elif mode == "rstrip spaces (ขวา)":
+            s_new[mask] = s_new[mask].str.rstrip()
+        elif mode == "remove substring":
+            if substr:
+                s_new[mask] = s_new[mask].str.replace(substr, "", regex=False)
+        elif mode == "keep first N chars":
+            s_new[mask] = s_new[mask].str.slice(0, n)
+        elif mode == "keep last N chars":
+            s_new[mask] = s_new[mask].str.slice(-n if n > 0 else None)
+        df[col] = s_new
+        self.df_out = df
+        self._update_progress(step_inc=1, note="ประมวลผลแล้ว")
+        self._refresh_tables()
+        self._refresh_column_widgets()
+        self._finish_progress("ตัดค่าสำเร็จ ✅")
     def _do_delete(self):
         if self.df_orig is None or self.df_orig.empty:
             return
@@ -653,14 +715,16 @@ class SimpleTransformTool(QtWidgets.QWidget):
         if not val:
             return
         op = self.del_op.currentText()
-        with self._busy(f"Deleting rows from '{col}'"):
-            df = self.df_orig.copy()
-            m = self._filter_mask(df[col], op, val)
-            before = len(df)
-            df = df.loc[~m].copy()
-            removed = before - len(df)
-            self.df_out = df
-            self._refresh_tables()
+        self._start_progress(f"ลบแถวจาก '{col}'", total_steps=1)
+        df = self.df_orig.copy()
+        m = self._filter_mask(df[col], op, val)
+        before = len(df)
+        df = df.loc[~m].copy()
+        removed = before - len(df)
+        self.df_out = df
+        self._update_progress(step_inc=1, note=f"ลบ {removed} แถว")
+        self._refresh_tables()
+        self._finish_progress("ลบแถวสำเร็จ ✅")
         QtWidgets.QMessageBox.information(self, "Delete", f"ลบ {removed} แถวเรียบร้อยแล้ว")
     def _do_pad(self):
         if self.df_orig is None or self.df_orig.empty:
@@ -674,25 +738,27 @@ class SimpleTransformTool(QtWidgets.QWidget):
         ch = (self.pad_char.text() or "0")[0]
         side = self.pad_side.currentText()
         only_shorter = self.chk_pad_only_shorter.isChecked()
-        with self._busy(f"Padding '{col}'"):
-            df = self.df_orig.copy()
-            s = df[col].astype(str)
-            if only_shorter:
-                mask = s.str.len() < n
+        self._start_progress(f"เติมค่าใน '{col}' (ด้าน {side})", total_steps=1)
+        df = self.df_orig.copy()
+        s = df[col].astype(str)
+        if only_shorter:
+            mask = s.str.len() < n
+        else:
+            mask = pd.Series([True] * len(df), index=df.index)
+        if side == "Left":
+            if ch == "0":
+                s_pad = s.str.zfill(n)
             else:
-                mask = pd.Series([True] * len(df), index=df.index)
-            if side == "Left":
-                if ch == "0":
-                    s_pad = s.str.zfill(n)
-                else:
-                    s_pad = s.str.pad(n, side="left", fillchar=ch)
-            else:
-                s_pad = s.str.pad(n, side="right", fillchar=ch)
-            s.loc[mask] = s_pad.loc[mask]
-            df[col] = s
-            self.df_out = df
-            self._refresh_tables()
-            self._refresh_column_widgets()
+                s_pad = s.str.pad(n, side="left", fillchar=ch)
+        else:
+            s_pad = s.str.pad(n, side="right", fillchar=ch)
+        s.loc[mask] = s_pad.loc[mask]
+        df[col] = s
+        self.df_out = df
+        self._update_progress(step_inc=1, note="ประมวลผลแล้ว")
+        self._refresh_tables()
+        self._refresh_column_widgets()
+        self._finish_progress("เติมค่าสำเร็จ ✅")
     def _do_group_sum(self):
         if self.df_orig is None or self.df_orig.empty:
             return
@@ -706,32 +772,42 @@ class SimpleTransformTool(QtWidgets.QWidget):
         # Read selected columns from dropdowns
         grp_col = self.ddl_group_by.currentText().strip()
         sum_col = self.ddl_sum_col.currentText().strip()
-        with self._busy("Running Group / Sum"):
-            df = self.df_orig.copy()
+        self._start_progress(f"ประมวลผล {mode}", total_steps=1)
+        df = self.df_orig.copy()
+        try:
             if mode == "group":
                 if not grp_col or grp_col not in df.columns:
                     QtWidgets.QMessageBox.information(self, "Group", "โปรดเลือก Group by column")
+                    self._finish_progress("ล้มเหลว ❌")
                     return
                 out = df.groupby([grp_col], dropna=False).size().reset_index(name="count")
             elif mode == "sum":
                 if not sum_col or sum_col not in df.columns:
                     QtWidgets.QMessageBox.information(self, "Sum", "โปรดเลือก Sum column")
+                    self._finish_progress("ล้มเหลว ❌")
                     return
                 out_val = _safe_numeric(df[sum_col]).sum()
                 out = pd.DataFrame([{sum_col: out_val}])
             else:  # group+sum
                 if not grp_col or grp_col not in df.columns:
                     QtWidgets.QMessageBox.information(self, "Group + Sum", "โปรดเลือก Group by column")
+                    self._finish_progress("ล้มเหลว ❌")
                     return
                 if not sum_col or sum_col not in df.columns:
                     QtWidgets.QMessageBox.information(self, "Group + Sum", "โปรดเลือก Sum column")
+                    self._finish_progress("ล้มเหลว ❌")
                     return
                 df2 = df.copy()
                 df2[sum_col] = _safe_numeric(df2[sum_col])
                 out = df2.groupby([grp_col], dropna=False)[sum_col].sum().reset_index()
             self.df_out = out
+            self._update_progress(step_inc=1, note="ประมวลผลเสร็จ")
             self._refresh_tables()
             self._refresh_column_widgets()
+            self._finish_progress("ประมวลผลสำเร็จ ✅")
+        except Exception as e:
+            self._finish_progress("ล้มเหลว ❌")
+            QtWidgets.QMessageBox.critical(self, "Error", str(e))
     def _do_calc(self):
         if self.df_orig is None or self.df_orig.empty:
             return
@@ -753,39 +829,43 @@ class SimpleTransformTool(QtWidgets.QWidget):
                         raise ValueError(f"ค่า constant ไม่ใช่ตัวเลข: {txt}")
                 return pd.Series([val] * len(self.df_orig), index=self.df_orig.index)
         try:
-            with self._busy("Computing"):
-                s_left = _get_operand(self.cal_left_mode_col.isChecked(), self.cal_left_col, self.cal_left_const)
-                s_right = _get_operand(self.cal_right_mode_col.isChecked(), self.cal_right_col, self.cal_right_const)
-                op = self.cal_op.currentText()
-                if op == "+":
-                    res = s_left + s_right
-                elif op == "-":
-                    res = s_left - s_right
-                elif op == "*":
-                    res = s_left * s_right
-                elif op == "/":
-                    s_right2 = s_right.replace(0, pd.NA)
-                    res = s_left / s_right2
-                elif op == "//":
-                    s_right2 = s_right.replace(0, pd.NA)
-                    res = (s_left // s_right2).astype("Float64")
-                elif op == "%":
-                    s_right2 = s_right.replace(0, pd.NA)
-                    res = s_left % s_right2
-                else:
-                    res = pd.Series([pd.NA] * len(s_left), index=s_left.index)
-                # clean inf/NaN -> empty string for display
-                res = pd.to_numeric(res, errors="coerce")
-                res = res.replace([pd.NA, float("inf"), float("-inf")], pd.NA)
-                out_col = res.astype(object).where(~pd.isna(res), "")
-                df = self.df_orig.copy()
-                df[outname] = out_col
-                self.df_out = df
-                self._refresh_tables()
-                self._refresh_column_widgets()
+            self._start_progress(f"คำนวณ {outname}", total_steps=1)
+            s_left = _get_operand(self.cal_left_mode_col.isChecked(), self.cal_left_col, self.cal_left_const)
+            s_right = _get_operand(self.cal_right_mode_col.isChecked(), self.cal_right_col, self.cal_right_const)
+            op = self.cal_op.currentText()
+            if op == "+":
+                res = s_left + s_right
+            elif op == "-":
+                res = s_left - s_right
+            elif op == "*":
+                res = s_left * s_right
+            elif op == "/":
+                s_right2 = s_right.replace(0, pd.NA)
+                res = s_left / s_right2
+            elif op == "//":
+                s_right2 = s_right.replace(0, pd.NA)
+                res = (s_left // s_right2).astype("Float64")
+            elif op == "%":
+                s_right2 = s_right.replace(0, pd.NA)
+                res = s_left % s_right2
+            else:
+                res = pd.Series([pd.NA] * len(s_left), index=s_left.index)
+            # clean inf/NaN -> empty string for display
+            res = pd.to_numeric(res, errors="coerce")
+            res = res.replace([pd.NA, float("inf"), float("-inf")], pd.NA)
+            out_col = res.astype(object).where(~pd.isna(res), "")
+            df = self.df_orig.copy()
+            df[outname] = out_col
+            self.df_out = df
+            self._update_progress(step_inc=1, note="เพิ่มคอลัมน์แล้ว")
+            self._refresh_tables()
+            self._refresh_column_widgets()
+            self._finish_progress("คำนวณสำเร็จ ✅")
         except ValueError as e:
+            self._finish_progress("ล้มเหลว ❌")
             QtWidgets.QMessageBox.warning(self, "Calculation", str(e))
         except Exception as e:
+            self._finish_progress("ล้มเหลว ❌")
             QtWidgets.QMessageBox.critical(self, "Calculation error", str(e))
 
 # entrypoint for standalone run
