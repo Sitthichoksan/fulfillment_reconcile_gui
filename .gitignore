@@ -7,6 +7,7 @@ __pycache__/
 
 # export data
 *.html
+plugins.json
 
 # C extensions
 *.so
